@@ -1,6 +1,17 @@
-// api/chat.js - Vercel serverless function
+// api/chat.js - Vercel serverless function with CORS enabled
 
 export default async function handler(req, res) {
+  // ✅ CORS headers so browser can call this from GitHub Pages / SharePoint
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Preflight for browsers
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
   try {
     if (req.method !== "POST") {
       res.status(405).json({ error: "Only POST is allowed" });
