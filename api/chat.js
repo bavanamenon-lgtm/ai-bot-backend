@@ -1,87 +1,115 @@
-// api/chat.js - Vercel serverless function with CORS enabled
+// api/chat.js
 
+import jsforce from "jsforce";
+
+// ---------- Salesforce connection helper ----------
+async function connectSF() {
+  const username = process.env.SF_USERNAME;
+  const password = process.env.SF_PASSWORD;
+  const token = process.env.SF_TOKEN;
+
+  if (!username || !password || !token) {
+    throw new Error(
+      "Salesforce credentials are missing. Please set SF_USERNAME, SF_PASSWORD and SF_TOKEN in Vercel."
+    );
+  }
+
+  const conn = new jsforce.Connection({
+    loginUrl: "https://login.salesforce.com",
+  });
+
+  await conn.login(username, password + token);
+  return conn;
+}
+
+// ---------- Main API handler ----------
 export default async function handler(req, res) {
-  // ✅ CORS headers so browser can call this from GitHub Pages / SharePoint
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Only POST is allowed" });
+    return;
+  }
 
-  // Preflight for browsers
-  if (req.method === "OPTIONS") {
-    res.status(200).end();
+  const { question } = req.body || {};
+
+  if (!question) {
+    res.status(400).json({ error: "Missing 'question' in request body" });
     return;
   }
 
   try {
-    if (req.method !== "POST") {
-      res.status(405).json({ error: "Only POST is allowed" });
-      return;
-    }
+    // 1) Connect to Salesforce
+    const conn = await connectSF();
 
-    const { question, page_context } = req.body || {};
+    // 2) Simple demo query – you can change this to any object / SOQL
+    const sfResult = await conn.query(`
+      SELECT Id, Name, Industry, BillingCity
+      FROM Account
+      LIMIT 5
+    `);
 
-    if (!question) {
-      res.status(400).json({ error: "Missing 'question' in body" });
-      return;
-    }
+    const sfText = JSON.stringify(sfResult.records, null, 2);
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      res
-        .status(500)
-        .json({ error: "GEMINI_API_KEY is not configured on the server" });
-      return;
-    }
-
+    // 3) Build prompt for Gemini
     const prompt = `
-You are an AI assistant embedded inside a SharePoint page.
-The current SharePoint context/path is: ${page_context || "unknown"}.
-
-Answer in simple, clear English.
-Keep responses short: 3–5 sentences maximum.
-If the user asks something unrelated to work, answer politely but briefly.
+You are an AI assistant connected to Salesforce CRM.
 
 User question:
 ${question}
-`;
 
-    const body = {
-      contents: [
-        {
-          parts: [{ text: prompt }]
-        }
-      ]
-    };
+Salesforce data (JSON):
+${sfText}
 
-    const url =
+Using ONLY the Salesforce data above, answer the user's question
+in simple English, in 3–4 sentences. If the answer is not in the data,
+say briefly that you cannot find it in Salesforce.
+    `;
+
+    // 4) Call Gemini
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "GEMINI_API_KEY is not configured. Please set it in Vercel Environment Variables."
+      );
+    }
+
+    const geminiUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
       apiKey;
 
-    const response = await fetch(url, {
+    const geminiResponse = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error("Gemini error:", response.status, data);
+    if (!geminiResponse.ok) {
+      const errText = await geminiResponse.text();
+      console.error("Gemini error:", geminiResponse.status, errText);
       res.status(500).json({
         error: "Gemini API error",
-        status: response.status,
-        details: data
+        status: geminiResponse.status,
+        details: errText,
       });
       return;
     }
 
+    const geminiData = await geminiResponse.json();
     const answer =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "Sorry, I couldn’t get a response from the AI.";
+      geminiData?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Sorry, I couldn't generate an answer from Salesforce data.";
 
-    res.status(200).json({ answer });
-  } catch (e) {
-    console.error("Backend error:", e);
-    res.status(500).json({ error: "Server error", details: e.message });
+    // 5) Send answer back to frontend
+    res.status(200).json({
+      answer,
+      sfRecords: sfResult.records, // optional: for debugging or display
+    });
+  } catch (err) {
+    console.error("API /api/chat error:", err);
+    res.status(500).json({
+      error: "Server error",
+      details: err.message,
+    });
   }
 }
