@@ -1,9 +1,9 @@
 {
-  "name": "ai-bot-backend",
+  "name": "ai-bot-backend-api",
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "jsforce": "^2.0.0",
+    "jsforce": "^1.11.1",
     "node-fetch": "^3.3.2"
   }
 }
