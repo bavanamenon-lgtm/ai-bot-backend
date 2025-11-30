@@ -1,106 +1,160 @@
-// api/chat.js
-import jsforce from "jsforce";
-import fetch from "node-fetch";
+// /api/chat.js
 
-export default async function handler(req, res) {
-  // --- CORS for Salesforce web tab / LWC host ---
-  res.setHeader("Access-Control-Allow-Origin", "*"); // for POC; later restrict to your SF domain
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+import jsforce from 'jsforce';
+import fetch from 'node-fetch';
 
-  // Handle preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+const {
+  SF_USERNAME,
+  SF_PASSWORD,
+  SF_TOKEN,
+  SF_LOGIN_URL,
+  GEMINI_API_KEY
+} = process.env;
+
+const loginUrl = SF_LOGIN_URL || 'https://login.salesforce.com';
+
+// Helper: call Gemini 2.0 Flash
+async function callGemini(prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+  const body = {
+    contents: [
+      {
+        parts: [{ text: prompt }]
+      }
+    ]
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error('Gemini error:', resp.status, txt);
+    throw new Error('Gemini API error');
   }
 
-  // Allow only POST
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST is allowed" });
+  const data = await resp.json();
+  const candidate = data.candidates && data.candidates[0];
+  const parts = candidate && candidate.content && candidate.content.parts;
+  const text = parts && parts[0] && parts[0].text;
+
+  return text || 'I was not able to generate a proper response.';
+}
+
+// Helper: very simple classifier
+function classifyQuestion(question) {
+  const q = (question || '').toLowerCase();
+
+  if (q.includes('chart') || q.includes('graph') || q.includes('pie')) {
+    return 'chart';
+  }
+
+  if (q.includes('summary') || q.includes('summarise') || q.includes('summarize')) {
+    return 'summary';
+  }
+
+  return 'generic';
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
+    return;
   }
 
   try {
     const { question } = req.body || {};
-    if (!question) {
-      return res
-        .status(400)
-        .json({ error: "Missing 'question' in request body" });
+
+    if (!question || typeof question !== 'string') {
+      res.status(400).json({ error: 'Missing "question" in request body.' });
+      return;
     }
 
-    // --- 1. Connect to Salesforce using username + password + token ---
-    const username = process.env.SF_USERNAME;
-    const password = process.env.SF_PASSWORD;
-    const token = process.env.SF_TOKEN || "";
-    const loginUrl = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
-
-    if (!username || !password) {
-      throw new Error("SF_USERNAME or SF_PASSWORD is not configured");
-    }
-
+    // --- 1) Login to Salesforce ---
     const conn = new jsforce.Connection({ loginUrl });
+    await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
 
-    // password + token (classic basic auth pattern)
-    await conn.login(username, password + token);
+    const mode = classifyQuestion(question);
 
-    // Simple sample query – top 5 Accounts
-    const result = await conn.query(
-      "SELECT Id, Name, BillingCountry, Industry FROM Account LIMIT 5"
-    );
+    let salesforceRecords = [];
+    let chartData = null;
 
-    const sfText = JSON.stringify(result.records, null, 2);
+    // --- 2) Choose SOQL based on question type ---
+    if (mode === 'chart') {
+      // Example: Opportunities grouped by Stage for chart
+      const soql =
+        "SELECT StageName, COUNT(Id) total " +
+        "FROM Opportunity " +
+        "WHERE IsClosed = false " +
+        "GROUP BY StageName";
 
-    // --- 2. Ask Gemini to summarise / answer based on Salesforce data ---
+      const result = await conn.query(soql);
+      salesforceRecords = result.records || [];
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not configured");
+      const labels = salesforceRecords.map(r => r.StageName || 'Unknown');
+      const values = salesforceRecords.map(r => {
+        // aggregate count comes back as expr0 or total
+        return Number(r.total || r.expr0 || 0);
+      });
+
+      chartData = {
+        title: 'Active opportunities by stage',
+        labels,
+        values
+      };
+    } else if (mode === 'summary') {
+      // Simple example: top 5 Accounts
+      const soql =
+        "SELECT Id, Name, Industry, Rating, Type " +
+        "FROM Account " +
+        "ORDER BY LastModifiedDate DESC " +
+        "LIMIT 5";
+
+      const result = await conn.query(soql);
+      salesforceRecords = result.records || [];
+    } else {
+      // Generic fallback: also top 5 Accounts
+      const soql =
+        "SELECT Id, Name, Industry, Rating, Type " +
+        "FROM Account " +
+        "ORDER BY LastModifiedDate DESC " +
+        "LIMIT 5";
+
+      const result = await conn.query(soql);
+      salesforceRecords = result.records || [];
     }
 
+    // --- 3) Build prompt for Gemini ---
     const prompt = `
-You are an AI assistant connected to Salesforce CRM.
+You are an assistant helping the user understand Salesforce data.
 
 User question:
 ${question}
 
-Salesforce query result (top 5 Accounts):
-${sfText}
+Mode: ${mode}
 
-Answer the user in simple English, 3–4 sentences maximum.
-If the user asks to list accounts, give a short bullet list with Name and Country.
-`;
+Salesforce data (JSON):
+${JSON.stringify(salesforceRecords, null, 2)}
 
-    const gRes = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
-        apiKey,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-        }),
-      }
-    );
+If mode is "chart":
+- Briefly explain what the chart would show (1–2 sentences).
+- Mention key stages and which stage has the highest and lowest count.
 
-    if (!gRes.ok) {
-      const bodyText = await gRes.text();
-      throw new Error(
-        `Gemini API error: ${gRes.status} ${gRes.statusText} – ${bodyText}`
-      );
-    }
+If mode is "summary":
+- Summarise in 3–4 sentences.
+- Highlight top accounts/opportunities, risks, or anything notable.
 
-    const data = await gRes.json();
-    const answer =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "I couldn't generate an answer.";
+Always answer clearly in plain English.
+    `.trim();
 
-    // --- 3. Return answer + raw Salesforce rows (handy for debugging) ---
-    return res.status(200).json({
+    const answer = await callGemini(prompt);
+
+    // --- 4) Return combined result to frontend ---
+    res.status(200).json({
       answer,
-      salesforceRecords: result.records,
-    });
-  } catch (err) {
-    console.error("API /api/chat error:", err);
-    return res.status(500).json({
-      error: err.message || "Server error",
-    });
-  }
-}
+      type: mode,
+      chartDa
