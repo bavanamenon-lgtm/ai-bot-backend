@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Vation AI Assistant</title>
+  <title>Vation AI Helper</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -129,17 +129,36 @@
       gap: 6px;
       margin-bottom: 6px;
     }
+
+    /* 🔵 NEW Salesforce-style quick buttons */
     .qa-btn {
+      display: inline-flex;
+      align-items: center;
       border-radius: 999px;
-      border: 1px solid #d8dde6;
-      background: #ffffff;
-      padding: 4px 10px;
-      font-size: 11px;
+      border: 1px solid #0176d3;      /* blue border like SF buttons */
+      background: #ffffff;             /* white pill */
+      color: #0176d3;                  /* blue text */
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 500;
       cursor: pointer;
+      line-height: 1.2;
+      transition: background 0.15s ease, color 0.15s ease,
+                  box-shadow 0.15s ease, border-color 0.15s ease;
     }
+
     .qa-btn:hover {
-      background: #f3f5f9;
+      background: #0176d3;             /* filled blue on hover */
+      color: #ffffff;                  /* white text on hover */
+      border-color: #015aa0;
+      box-shadow: 0 0 0 1px rgba(1, 118, 211, 0.2);
     }
+
+    .qa-btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px rgba(1, 118, 211, 0.8);
+    }
+
     .side-panel {
       background: #ffffff;
       border-radius: 8px;
@@ -214,7 +233,7 @@
 </div>
 
 <script>
-  // 🔧 CHANGE THIS TO YOUR BACKEND DOMAIN
+  // 🔧 CHANGE THIS TO YOUR BACKEND DOMAIN IF NEEDED
   const API_ENDPOINT = 'https://ai-bot-backend-black.vercel.app/api/chat';
 
   const chatWindow = document.getElementById('chatWindow');
@@ -261,8 +280,6 @@
 
       const data = await resp.json();
 
-      // Remove last "Thinking…" bubble (optional improvement)
-      // Here we just append the final answer
       if (data.error) {
         appendMessage(data.error, 'bot', true);
       } else {
@@ -334,7 +351,10 @@
   });
 
   // Initial bot greeting
-  appendMessage('Hi, I can summarise Salesforce accounts and show a pie chart of active opportunities by stage. Try one of the quick buttons above.', 'bot');
+  appendMessage(
+    'Hi, I can summarise Salesforce accounts and show a pie chart of active opportunities by stage. Try one of the quick buttons above.',
+    'bot'
+  );
 </script>
 </body>
 </html>
