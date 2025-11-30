@@ -1,7 +1,6 @@
 // /api/chat.js
 
 import jsforce from 'jsforce';
-import fetch from 'node-fetch';
 
 const {
   SF_USERNAME,
@@ -13,9 +12,10 @@ const {
 
 const loginUrl = SF_LOGIN_URL || 'https://login.salesforce.com';
 
-// Helper: call Gemini 2.0 Flash
+// ---- Gemini helper ----
 async function callGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   const body = {
     contents: [
@@ -45,47 +45,47 @@ async function callGemini(prompt) {
   return text || 'I was not able to generate a proper response.';
 }
 
-// Helper: very simple classifier
+// ---- Simple classifier ----
 function classifyQuestion(question) {
   const q = (question || '').toLowerCase();
 
   if (q.includes('chart') || q.includes('graph') || q.includes('pie')) {
     return 'chart';
   }
-
   if (q.includes('summary') || q.includes('summarise') || q.includes('summarize')) {
     return 'summary';
   }
-
   return 'generic';
 }
 
+// ---- Main handler ----
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
+    res
+      .status(405)
+      .json({ error: 'Use POST with JSON body { "question": "..." }' });
     return;
   }
 
   try {
     const { question } = req.body || {};
-
     if (!question || typeof question !== 'string') {
       res.status(400).json({ error: 'Missing "question" in request body.' });
       return;
     }
 
-    // --- 1) Login to Salesforce ---
+    // 1) Login to Salesforce
     const conn = new jsforce.Connection({ loginUrl });
     await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
 
+    // 2) Decide mode + query SF
     const mode = classifyQuestion(question);
 
     let salesforceRecords = [];
     let chartData = null;
 
-    // --- 2) Choose SOQL based on question type ---
     if (mode === 'chart') {
-      // Example: Opportunities grouped by Stage for chart
+      // Opportunities grouped by StageName
       const soql =
         "SELECT StageName, COUNT(Id) total " +
         "FROM Opportunity " +
@@ -95,29 +95,18 @@ export default async function handler(req, res) {
       const result = await conn.query(soql);
       salesforceRecords = result.records || [];
 
-      const labels = salesforceRecords.map(r => r.StageName || 'Unknown');
-      const values = salesforceRecords.map(r => {
-        // aggregate count comes back as expr0 or total
-        return Number(r.total || r.expr0 || 0);
-      });
+      const labels = salesforceRecords.map((r) => r.StageName || 'Unknown');
+      const values = salesforceRecords.map((r) =>
+        Number(r.total || r.expr0 || 0)
+      );
 
       chartData = {
         title: 'Active opportunities by stage',
         labels,
         values
       };
-    } else if (mode === 'summary') {
-      // Simple example: top 5 Accounts
-      const soql =
-        "SELECT Id, Name, Industry, Rating, Type " +
-        "FROM Account " +
-        "ORDER BY LastModifiedDate DESC " +
-        "LIMIT 5";
-
-      const result = await conn.query(soql);
-      salesforceRecords = result.records || [];
     } else {
-      // Generic fallback: also top 5 Accounts
+      // Top 5 accounts (used for both summary + generic)
       const soql =
         "SELECT Id, Name, Industry, Rating, Type " +
         "FROM Account " +
@@ -128,7 +117,7 @@ export default async function handler(req, res) {
       salesforceRecords = result.records || [];
     }
 
-    // --- 3) Build prompt for Gemini ---
+    // 3) Build Gemini prompt
     const prompt = `
 You are an assistant helping the user understand Salesforce data.
 
@@ -148,13 +137,23 @@ If mode is "summary":
 - Summarise in 3–4 sentences.
 - Highlight top accounts/opportunities, risks, or anything notable.
 
-Always answer clearly in plain English.
-    `.trim();
+Answer in clear, simple English.
+`.trim();
 
     const answer = await callGemini(prompt);
 
-    // --- 4) Return combined result to frontend ---
+    // 4) Send back to UI
     res.status(200).json({
       answer,
       type: mode,
-      chartDa
+      chartData,
+      salesforceRecords
+    });
+  } catch (err) {
+    console.error('Backend error in /api/chat:', err);
+    res.status(500).json({
+      error: 'Internal error in /api/chat.',
+      details: String(err)
+    });
+  }
+}
