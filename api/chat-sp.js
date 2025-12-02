@@ -1,6 +1,6 @@
 // api/chat-sp.js
 //
-// Backend for SharePoint -> Graph -> Gemini
+// Backend for SharePoint -> Microsoft Graph -> Gemini
 // Uses client credentials flow with Microsoft Graph
 // and Gemini 2.0 Flash for summarisation.
 
@@ -88,18 +88,21 @@ async function getGraphToken() {
 
 // --- Helper: search SharePoint content using Graph Search API ---
 async function searchSharePoint(queryText, accessToken) {
-  // Keep the query short-ish for Graph search
+  // Shorten query text for Graph search safety
   const queryString = (queryText || '').slice(0, 200);
 
   const url = 'https://graph.microsoft.com/v1.0/search/query';
 
+  // Use a very safe, minimal search body:
+  // - Only driveItem (files) to avoid unsupported entity types
+  // - Top 5 results
   const body = {
     requests: [
       {
-        entityTypes: ['driveItem', 'listItem', 'sitePage'],
+        entityTypes: ['driveItem'],
         query: { queryString },
         from: 0,
-        size: 5, // top 5 hits is enough for Gemini
+        size: 5,
       },
     ],
   };
@@ -113,24 +116,34 @@ async function searchSharePoint(queryText, accessToken) {
     body: JSON.stringify(body),
   });
 
-  const data = await resp.json();
+  const text = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    console.error('Graph search non-JSON response:', text);
+    throw new Error('Graph search returned non-JSON response');
+  }
 
   if (!resp.ok) {
     console.error('Graph search error:', data);
-    throw new Error('Graph search API error');
+    throw new Error(
+      `Graph search API error: ${data.error?.code || 'Unknown'} - ${
+        data.error?.message || 'No message'
+      }`
+    );
   }
 
   const results = [];
-
-  const containers =
+  const hitsContainers =
     data.value &&
     data.value[0] &&
     data.value[0].hitsContainers &&
     data.value[0].hitsContainers[0] &&
     data.value[0].hitsContainers[0].hits;
 
-  if (Array.isArray(containers)) {
-    for (const hit of containers) {
+  if (Array.isArray(hitsContainers)) {
+    for (const hit of hitsContainers) {
       const res = hit.resource || {};
       results.push({
         name: res.name || res.title || '',
@@ -164,7 +177,7 @@ export default async function handler(req, res) {
     // 1) Get Graph token
     const token = await getGraphToken();
 
-    // 2) Search SharePoint
+    // 2) Search SharePoint (files via driveItem)
     const spResults = await searchSharePoint(question, token);
 
     // 3) Build Gemini prompt
