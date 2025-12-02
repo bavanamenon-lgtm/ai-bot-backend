@@ -86,23 +86,66 @@ async function getGraphToken() {
   return data.access_token;
 }
 
+// --- Helper: get tenant region (dataLocationCode for SharePoint) ---
+async function getTenantRegion(accessToken) {
+  // We call the root SharePoint site and read siteCollection.dataLocationCode
+  // to know which region string to use in the Search request.
+  const url =
+    'https://graph.microsoft.com/v1.0/sites/root?$select=siteCollection';
+
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const text = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    console.error('Graph region non-JSON response:', text);
+    throw new Error('Graph region call returned non-JSON response');
+  }
+
+  if (!resp.ok) {
+    console.error('Graph region error:', data);
+    throw new Error('Failed to determine tenant region for search.');
+  }
+
+  const code =
+    data.siteCollection &&
+    data.siteCollection.dataLocationCode &&
+    String(data.siteCollection.dataLocationCode).trim();
+
+  // Example values: "NAM", "EUR", "APAC", "AUS", etc.
+  if (!code) {
+    console.warn(
+      'No dataLocationCode returned from sites/root. Falling back to NAM.'
+    );
+    return 'NAM';
+  }
+
+  console.log('Using tenant region for search:', code);
+  return code;
+}
+
 // --- Helper: search SharePoint content using Graph Search API ---
-async function searchSharePoint(queryText, accessToken) {
+async function searchSharePoint(queryText, accessToken, region) {
   // Shorten query text for Graph search safety
   const queryString = (queryText || '').slice(0, 200);
 
   const url = 'https://graph.microsoft.com/v1.0/search/query';
 
-  // Use a very safe, minimal search body:
-  // - Only driveItem (files) to avoid unsupported entity types
-  // - Top 5 results
   const body = {
     requests: [
       {
-        entityTypes: ['driveItem'],
+        entityTypes: ['driveItem'], // files only, safe
         query: { queryString },
         from: 0,
         size: 5,
+        region: region, // required when using application permissions
       },
     ],
   };
@@ -177,10 +220,13 @@ export default async function handler(req, res) {
     // 1) Get Graph token
     const token = await getGraphToken();
 
-    // 2) Search SharePoint (files via driveItem)
-    const spResults = await searchSharePoint(question, token);
+    // 2) Determine tenant region for SharePoint search
+    const region = await getTenantRegion(token);
 
-    // 3) Build Gemini prompt
+    // 3) Search SharePoint (files via driveItem) with region
+    const spResults = await searchSharePoint(question, token, region);
+
+    // 4) Build Gemini prompt
     const prompt = `
 You are an assistant helping the user understand information stored in SharePoint.
 
@@ -198,13 +244,14 @@ Using ONLY the information above:
 Answer in clear, simple English.
 `.trim();
 
-    // 4) Call Gemini for the final answer
+    // 5) Call Gemini for the final answer
     const answer = await callGemini(prompt);
 
-    // 5) Return answer + raw search results
+    // 6) Return answer + raw search results
     res.status(200).json({
       answer,
       source: 'sharepoint',
+      regionUsed: region,
       sharePointResults: spResults,
     });
   } catch (err) {
