@@ -1,12 +1,9 @@
 // api/chat-sp.js
 //
-// SharePoint -> Graph -> Gemini (SAFE MODE)
-// - Only summarises: .docx, .xlsx, .txt, .csv
-// - No file content stored or logged
-// - Everything processed in-memory and discarded
-
-import mammoth from "mammoth";
-import XLSX from "xlsx";
+// SharePoint -> Graph -> Gemini (SAFE MODE, crash-proof)
+// - Summarises: .docx, .xlsx, .txt, .csv
+// - Uses dynamic imports for mammoth/xlsx so missing libs don't crash the function
+// - No file content is stored or logged; processed in-memory only.
 
 const {
   GRAPH_TENANT_ID,
@@ -18,7 +15,6 @@ const {
 // ---------------- Gemini helper ----------------
 
 async function callGeminiSummary({ question, fileName, extractedText }) {
-  // Hard safety cap: don't send huge text
   const MAX_CHARS = 8000;
   const safeText =
     (extractedText || "").toString().slice(0, MAX_CHARS) ||
@@ -126,10 +122,8 @@ async function getGraphToken() {
 
 // ---------------- Graph search helper ----------------
 
-// SAFE region: you already discovered your tenant requires "IND"
 const SHAREPOINT_REGION = "IND";
 
-// Get driveItems that match the question
 async function searchSharePoint(question, accessToken) {
   const queryString = (question || "").slice(0, 200);
 
@@ -213,7 +207,6 @@ function isSupportedExtension(ext) {
   return ["docx", "xlsx", "txt", "csv"].includes(ext);
 }
 
-// Download file content as Buffer
 async function downloadFileBuffer(accessToken, driveId, itemId) {
   if (!driveId || !itemId) {
     throw new Error("Missing driveId or itemId for file download");
@@ -229,7 +222,6 @@ async function downloadFileBuffer(accessToken, driveId, itemId) {
   });
 
   if (!resp.ok) {
-    const text = await resp.text();
     console.error("Graph file download error (masked):", resp.status);
     throw new Error("Failed to download file content from Graph");
   }
@@ -238,42 +230,52 @@ async function downloadFileBuffer(accessToken, driveId, itemId) {
   return Buffer.from(arrayBuffer);
 }
 
-// Extract text based on file extension (SAFE set)
+// Dynamic, crash-proof extraction
 async function extractTextFromBuffer(buffer, ext) {
   if (ext === "txt" || ext === "csv") {
-    // Assume UTF-8 text
     return buffer.toString("utf8");
   }
 
   if (ext === "docx") {
-    // Use mammoth to extract raw text from Word
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value || "";
+    try {
+      const mammoth = await import("mammoth");
+      const result = await mammoth.extractRawText({ buffer });
+      return result.value || "";
+    } catch (e) {
+      console.error("DOCX extraction not available (masked):", e.message);
+      return "";
+    }
   }
 
   if (ext === "xlsx") {
-    // Use xlsx to read workbook and flatten into text
-    const workbook = XLSX.read(buffer, { type: "buffer" });
-    let textChunks = [];
+    try {
+      const xlsxModule = await import("xlsx");
+      const XLSX = xlsxModule.default || xlsxModule;
+      const workbook = XLSX.read(buffer, { type: "buffer" });
+      let textChunks = [];
 
-    workbook.SheetNames.forEach((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      if (!sheet) return;
-      const sheetJson = XLSX.utils.sheet_to_json(sheet, {
-        header: 1, // 2D array
-        blankrows: false,
+      workbook.SheetNames.forEach((sheetName) => {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) return;
+        const sheetJson = XLSX.utils.sheet_to_json(sheet, {
+          header: 1,
+          blankrows: false,
+        });
+        sheetJson.forEach((row) => {
+          const cells = (row || []).map((c) => (c == null ? "" : String(c)));
+          const line = cells.join(" | ").trim();
+          if (line) textChunks.push(line);
+        });
       });
-      sheetJson.forEach((row) => {
-        const cells = (row || []).map((c) => (c == null ? "" : String(c)));
-        const line = cells.join(" | ").trim();
-        if (line) textChunks.push(line);
-      });
-    });
 
-    return textChunks.join("\n");
+      return textChunks.join("\n");
+    } catch (e) {
+      console.error("XLSX extraction not available (masked):", e.message);
+      return "";
+    }
   }
 
-  // Unsupported (should not reach here in SAFE mode)
+  // Unsupported (shouldn't be called for other types in SAFE mode)
   return "";
 }
 
@@ -294,12 +296,9 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 1) Get Graph token
     const token = await getGraphToken();
 
-    // 2) Search SharePoint for matching files
     const results = await searchSharePoint(question, token);
-
     if (!results.length) {
       res.status(200).json({
         answer:
@@ -311,8 +310,9 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 3) Pick first SUPPORTED file (docx/xlsx/txt/csv)
-    const supported = results.find((r) => isSupportedExtension(getExtension(r.name)));
+    const supported = results.find((r) =>
+      isSupportedExtension(getExtension(r.name))
+    );
 
     if (!supported) {
       res.status(200).json({
@@ -327,30 +327,33 @@ export default async function handler(req, res) {
 
     const ext = getExtension(supported.name);
 
-    // 4) Download file & extract text
     const buffer = await downloadFileBuffer(token, supported.driveId, supported.id);
     const extractedText = await extractTextFromBuffer(buffer, ext);
 
     if (!extractedText || !extractedText.trim()) {
+      // Very important: graceful, no crash path
       res.status(200).json({
         answer:
-          "I could open the file but couldn't extract meaningful text from it. It may be empty, purely numeric, or in a layout that's hard to read.",
+          "I could access the file but couldn't safely extract meaningful text from it in this environment. For this POC, only simple text-based documents (txt/csv and some docx/xlsx) are summarised.",
         source: "sharepoint",
         regionUsed: SHAREPOINT_REGION,
-        chosenFile: supported,
+        chosenFile: {
+          name: supported.name,
+          webUrl: supported.webUrl,
+          lastModified: supported.lastModified,
+          extension: ext,
+        },
         sharePointResults: results,
       });
       return;
     }
 
-    // 5) Ask Gemini to summarise the extracted text
     const summary = await callGeminiSummary({
       question,
       fileName: supported.name,
       extractedText,
     });
 
-    // 6) Return safe response (no file content)
     res.status(200).json({
       answer: summary,
       source: "sharepoint",
