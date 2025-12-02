@@ -86,51 +86,6 @@ async function getGraphToken() {
   return data.access_token;
 }
 
-// --- Helper: get tenant region (dataLocationCode for SharePoint) ---
-async function getTenantRegion(accessToken) {
-  // We call the root SharePoint site and read siteCollection.dataLocationCode
-  // to know which region string to use in the Search request.
-  const url =
-    'https://graph.microsoft.com/v1.0/sites/root?$select=siteCollection';
-
-  const resp = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  const text = await resp.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    console.error('Graph region non-JSON response:', text);
-    throw new Error('Graph region call returned non-JSON response');
-  }
-
-  if (!resp.ok) {
-    console.error('Graph region error:', data);
-    throw new Error('Failed to determine tenant region for search.');
-  }
-
-  const code =
-    data.siteCollection &&
-    data.siteCollection.dataLocationCode &&
-    String(data.siteCollection.dataLocationCode).trim();
-
-  // Example values: "NAM", "EUR", "APAC", "AUS", etc.
-  if (!code) {
-    console.warn(
-      'No dataLocationCode returned from sites/root. Falling back to NAM.'
-    );
-    return 'NAM';
-  }
-
-  console.log('Using tenant region for search:', code);
-  return code;
-}
-
 // --- Helper: search SharePoint content using Graph Search API ---
 async function searchSharePoint(queryText, accessToken, region) {
   // Shorten query text for Graph search safety
@@ -141,11 +96,11 @@ async function searchSharePoint(queryText, accessToken, region) {
   const body = {
     requests: [
       {
-        entityTypes: ['driveItem'], // files only, safe
+        entityTypes: ['driveItem'], // files only
         query: { queryString },
         from: 0,
         size: 5,
-        region: region, // required when using application permissions
+        region: region, // required for application permissions; for your tenant: 'IND'
       },
     ],
   };
@@ -220,8 +175,8 @@ export default async function handler(req, res) {
     // 1) Get Graph token
     const token = await getGraphToken();
 
-    // 2) Determine tenant region for SharePoint search
-    const region = await getTenantRegion(token);
+    // 2) Use fixed region for your tenant (from error: "Only valid regions are IND")
+    const region = 'IND';
 
     // 3) Search SharePoint (files via driveItem) with region
     const spResults = await searchSharePoint(question, token, region);
