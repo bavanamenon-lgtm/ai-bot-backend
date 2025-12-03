@@ -4,8 +4,10 @@
   <meta charset="UTF-8" />
   <title>Vation AI – SharePoint Assistant</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- Chart.js CDN (we keep it for consistency; you can use later for SP charts) -->
+
+  <!-- Chart.js (for future metrics/charts) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
   <style>
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -123,12 +125,14 @@
       opacity: 0.5;
       cursor: not-allowed;
     }
+
     .quick-actions {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       margin-bottom: 6px;
     }
+
     .qa-btn {
       display: inline-flex;
       align-items: center;
@@ -150,10 +154,7 @@
       border-color: #015aa0;
       box-shadow: 0 0 0 1px rgba(1, 118, 211, 0.2);
     }
-    .qa-btn:focus-visible {
-      outline: none;
-      box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px rgba(1, 118, 211, 0.8);
-    }
+
     .side-panel {
       background: #ffffff;
       border-radius: 8px;
@@ -171,10 +172,6 @@
       margin: 0 0 8px 0;
       color: #444;
     }
-    canvas {
-      width: 100% !important;
-      height: auto !important;
-    }
     .badge {
       display: inline-block;
       background: #f4f6fb;
@@ -186,11 +183,12 @@
     }
   </style>
 </head>
+
 <body>
 <div class="app">
   <div class="header">
     <h1>Vation AI – SharePoint Assistant</h1>
-    <p>Ask about documents and content stored in SharePoint. I’ll search and summarise for you.</p>
+    <p>Ask about documents stored in SharePoint. I’ll search and summarise for you.</p>
   </div>
 
   <div class="main">
@@ -200,7 +198,7 @@
         <button class="qa-btn" data-q="Search SharePoint for onboarding documents and summarise them.">
           🔍 Onboarding docs summary
         </button>
-        <button class="qa-btn" data-q="Find recent HR policy documents in SharePoint and summarise key changes.">
+        <button class="qa-btn" data-q="Find recent HR policy documents and summarise key changes.">
           📄 HR policies – key changes
         </button>
         <button class="qa-btn" data-q="List the last 5 modified documents in SharePoint and summarise them.">
@@ -212,35 +210,34 @@
 
       <div class="input-row">
         <textarea id="questionInput"
-                  placeholder="Ask something like: Search SharePoint for onboarding documents and summarise them."></textarea>
+          placeholder="Ask something like: Search SharePoint for onboarding documents and summarise them."></textarea>
         <button id="sendBtn">Send</button>
       </div>
     </div>
 
-    <!-- Side panel (can be used for charts or highlights later) -->
+    <!-- Right-side panel -->
     <div class="side-panel">
       <div class="badge">SharePoint Context</div>
       <h2 id="chartTitle">No additional view yet</h2>
-      <p id="chartSubtitle">I’ll focus on smart summaries for now. We can add charts or KPIs later.</p>
+      <p id="chartSubtitle">Summaries will appear in chat. Charts and KPIs can be added later.</p>
       <canvas id="chartCanvas"></canvas>
     </div>
   </div>
 </div>
 
 <script>
-  // 🔧 IMPORTANT: backend for SharePoint
-  const API_ENDPOINT = 'https://ai-bot-backend-black.vercel.app/api/chat-sp';
+  const API_ENDPOINT = "https://ai-bot-backend-black.vercel.app/api/chat-sp";
 
-  const chatWindow = document.getElementById('chatWindow');
-  const input = document.getElementById('questionInput');
-  const sendBtn = document.getElementById('sendBtn');
+  const chatWindow = document.getElementById("chatWindow");
+  const input = document.getElementById("questionInput");
+  const sendBtn = document.getElementById("sendBtn");
 
   function appendMessage(text, from, isError = false) {
-    const row = document.createElement('div');
-    row.className = 'row ' + (from === 'user' ? 'user' : 'bot');
+    const row = document.createElement("div");
+    row.className = "row " + (from === "user" ? "user" : "bot");
 
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble' + (isError ? ' error' : '');
+    const bubble = document.createElement("div");
+    bubble.className = "bubble" + (isError ? " error" : "");
     bubble.textContent = text;
 
     row.appendChild(bubble);
@@ -251,66 +248,60 @@
   function setLoading(isLoading) {
     sendBtn.disabled = isLoading;
     input.disabled = isLoading;
-    if (isLoading) {
-      appendMessage('Thinking…', 'bot');
-    }
+    if (isLoading) appendMessage("Thinking…", "bot");
   }
 
   async function sendQuestion(question) {
     if (!question) return;
-    appendMessage(question, 'user');
+
+    appendMessage(question, "user");
     setLoading(true);
 
     try {
       const resp = await fetch(API_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question })
       });
 
       const data = await resp.json();
 
       if (data.error) {
-        appendMessage(data.error, 'bot', true);
+        appendMessage(data.error, "bot", true);
       } else {
-        appendMessage(data.answer || 'No answer field returned.', 'bot');
+        appendMessage(data.answer || "No answer returned.", "bot");
       }
-    } catch (e) {
-      console.error(e);
-      appendMessage('Something went wrong calling the backend.', 'bot', true);
+    } catch (err) {
+      console.error(err);
+      appendMessage("Something went wrong calling the backend.", "bot", true);
     } finally {
       setLoading(false);
     }
   }
 
-  // Send button click
-  sendBtn.addEventListener('click', () => {
+  sendBtn.addEventListener("click", () => {
     const q = input.value.trim();
     if (!q) return;
-    input.value = '';
+    input.value = "";
     sendQuestion(q);
   });
 
-  // Enter key
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendBtn.click();
     }
   });
 
-  // Quick action buttons
-  document.querySelectorAll('.qa-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const q = btn.getAttribute('data-q');
-      sendQuestion(q);
+  document.querySelectorAll(".qa-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      sendQuestion(btn.dataset.q);
     });
   });
 
-  // Initial bot greeting
   appendMessage(
-    'Hi, I can search your SharePoint files (region: India) and summarise what is relevant to your question. Try one of the quick buttons above.',
-    'bot'
+    "Hi! I can search your SharePoint files (region: India) and summarise what is relevant to your question. Try a quick button or ask anything.",
+    "bot"
   );
 </script>
 </body>
