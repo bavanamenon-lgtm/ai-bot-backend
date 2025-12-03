@@ -1,9 +1,11 @@
 // api/chat-sp.js
 //
-// SharePoint -> Graph -> Gemini (SAFE MODE, crash-proof)
-// - Summarises: .docx, .xlsx, .txt, .csv
-// - Uses dynamic imports for mammoth/xlsx so missing libs don't crash the function
-// - No file content is stored or logged; processed in-memory only.
+// SharePoint -> Graph Drive Search -> Gemini (SAFE MODE)
+//
+// - Searches only inside the VationGTM site's "Documents" library
+// - Summarises only: .docx, .xlsx, .txt, .csv
+// - Uses dynamic imports for mammoth/xlsx (no crash if missing)
+// - Processes file content in-memory; never stores or logs it.
 
 const {
   GRAPH_TENANT_ID,
@@ -12,7 +14,7 @@ const {
   GEMINI_API_KEY,
 } = process.env;
 
-// ---------------- Gemini helper ----------------
+// -------- Gemini helper --------
 
 async function callGeminiSummary({ question, fileName, extractedText }) {
   const MAX_CHARS = 8000;
@@ -36,10 +38,10 @@ Extracted text from the document (possibly truncated):
 ${safeText}
 
 Rules:
-- Focus only on this document.
+- Focus ONLY on this document.
 - If the text is very short or looks empty, say that clearly.
 - Give a concise summary (5–8 bullet points or short paragraphs).
-- Call out any obvious risks, deadlines, or owners if visible.
+- Call out any obvious risks, owners, milestones or deadlines if visible.
 - Do NOT invent data, contacts, or numbers.
 
 Provide the summary now.
@@ -59,10 +61,10 @@ Provide the summary now.
     body: JSON.stringify(body),
   });
 
-  const text = await resp.text();
+  const raw = await resp.text();
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(raw);
   } catch (e) {
     console.error("Gemini non-JSON response (masked).");
     throw new Error("Gemini returned a non-JSON response");
@@ -82,7 +84,7 @@ Provide the summary now.
   return answer || "I was not able to generate a proper summary.";
 }
 
-// ---------------- Graph token helper ----------------
+// -------- Graph token helper --------
 
 async function getGraphToken() {
   const tenantId = GRAPH_TENANT_ID;
@@ -120,82 +122,62 @@ async function getGraphToken() {
   return data.access_token;
 }
 
-// ---------------- Graph search helper ----------------
+// -------- Site + Drive helpers (VationGTM) --------
 
-const SHAREPOINT_REGION = "IND";
+// Hard-coded for this POC:
+// Host: vationbangalore.sharepoint.com
+// Site path: /sites/VationGTM
+const SP_HOSTNAME = "vationbangalore.sharepoint.com";
+const SP_SITE_PATH = "/sites/VationGTM";
 
-async function searchSharePoint(question, accessToken) {
-  const queryString = (question || "").slice(0, 200);
-
-  const url = "https://graph.microsoft.com/v1.0/search/query";
-
-  const body = {
-    requests: [
-      {
-        entityTypes: ["driveItem"],
-        query: { queryString },
-        from: 0,
-        size: 5,
-        region: SHAREPOINT_REGION,
-      },
-    ],
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+// Find the site ID and the "Documents" library drive ID for VationGTM
+async function getSiteAndDriveIds(accessToken) {
+  // 1) Get site
+  const siteUrl = `https://graph.microsoft.com/v1.0/sites/${SP_HOSTNAME}:${SP_SITE_PATH}?$select=id`;
+  const siteResp = await fetch(siteUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
-
-  const raw = await resp.text();
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    console.error("Graph search non-JSON response (masked).");
-    throw new Error("Graph search returned non-JSON response");
+  const siteData = await siteResp.json();
+  if (!siteResp.ok) {
+    console.error("Graph get site error (masked):", siteData.error || "unknown");
+    throw new Error("Failed to get VationGTM SharePoint site from Graph");
+  }
+  const siteId = siteData.id;
+  if (!siteId) {
+    throw new Error("VationGTM siteId not found in Graph response");
   }
 
-  if (!resp.ok) {
-    console.error("Graph search error (masked):", {
-      error: data.error || "unknown",
-    });
-    throw new Error(
-      `Graph search API error: ${data.error?.code || "Unknown"} - ${
-        data.error?.message || "No message"
-      }`
+  // 2) Get drives for the site, pick the "Documents" library
+  const drivesUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`;
+  const drivesResp = await fetch(drivesUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const drivesData = await drivesResp.json();
+  if (!drivesResp.ok) {
+    console.error(
+      "Graph get drives error (masked):",
+      drivesData.error || "unknown"
     );
+    throw new Error("Failed to get drives for VationGTM site");
   }
 
-  const results = [];
-  const hitsContainers =
-    data.value &&
-    data.value[0] &&
-    data.value[0].hitsContainers &&
-    data.value[0].hitsContainers[0] &&
-    data.value[0].hitsContainers[0].hits;
-
-  if (Array.isArray(hitsContainers)) {
-    for (const hit of hitsContainers) {
-      const res = hit.resource || {};
-      const parent = res.parentReference || {};
-      results.push({
-        id: res.id || "",
-        driveId: parent.driveId || "",
-        name: res.name || res.title || "",
-        webUrl: res.webUrl || "",
-        lastModified: res.lastModifiedDateTime || "",
-      });
-    }
+  if (!Array.isArray(drivesData.value) || !drivesData.value.length) {
+    throw new Error("No drives returned for VationGTM site");
   }
 
-  return results;
+  // Prefer the drive named "Documents" or driveType = documentLibrary
+  let docsDrive =
+    drivesData.value.find((d) => d.name === "Documents") ||
+    drivesData.value.find((d) => d.driveType === "documentLibrary") ||
+    drivesData.value[0];
+
+  return {
+    siteId,
+    driveId: docsDrive.id,
+  };
 }
 
-// ---------------- Download + extract helpers ----------------
+// -------- Search helpers --------
 
 function getExtension(name = "") {
   const parts = name.split(".");
@@ -207,6 +189,68 @@ function isSupportedExtension(ext) {
   return ["docx", "xlsx", "txt", "csv"].includes(ext);
 }
 
+// Try to pull a "file-like" term from the question
+function buildSearchTerm(question) {
+  if (!question) return "";
+
+  // 1) Text inside quotes
+  const quoted = question.match(/["']([^"']+)["']/);
+  if (quoted && quoted[1]) return quoted[1];
+
+  // 2) Phrase before "document" or "file"
+  const docMatch = question.match(/summaris\w*\s+(.+?)\s+(document|file)/i);
+  if (docMatch && docMatch[1]) return docMatch[1];
+
+  // 3) Fallback to whole question
+  return question;
+}
+
+// Use Drive search limited to the VationGTM Documents drive
+async function searchFileInDrive(question, accessToken) {
+  const { driveId } = await getSiteAndDriveIds(accessToken);
+
+  const term = buildSearchTerm(question).slice(0, 200) || "";
+  const encoded = encodeURIComponent(term);
+
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root/search(q='${encoded}')`;
+
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const raw = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    console.error("Drive search non-JSON response (masked).");
+    throw new Error("Drive search returned non-JSON response");
+  }
+
+  if (!resp.ok) {
+    console.error("Drive search error (masked):", data.error || "unknown");
+    throw new Error("Drive search API error");
+  }
+
+  const results = [];
+  if (Array.isArray(data.value)) {
+    for (const item of data.value) {
+      const parent = item.parentReference || {};
+      results.push({
+        id: item.id || "",
+        driveId: parent.driveId || driveId,
+        name: item.name || "",
+        webUrl: item.webUrl || "",
+        lastModified: item.lastModifiedDateTime || "",
+      });
+    }
+  }
+
+  return results;
+}
+
+// -------- Download + extract --------
+
 async function downloadFileBuffer(accessToken, driveId, itemId) {
   if (!driveId || !itemId) {
     throw new Error("Missing driveId or itemId for file download");
@@ -215,10 +259,7 @@ async function downloadFileBuffer(accessToken, driveId, itemId) {
   const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/content`;
 
   const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!resp.ok) {
@@ -230,7 +271,6 @@ async function downloadFileBuffer(accessToken, driveId, itemId) {
   return Buffer.from(arrayBuffer);
 }
 
-// Dynamic, crash-proof extraction
 async function extractTextFromBuffer(buffer, ext) {
   if (ext === "txt" || ext === "csv") {
     return buffer.toString("utf8");
@@ -275,11 +315,10 @@ async function extractTextFromBuffer(buffer, ext) {
     }
   }
 
-  // Unsupported (shouldn't be called for other types in SAFE mode)
   return "";
 }
 
-// ---------------- Main handler ----------------
+// -------- Main handler --------
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -298,18 +337,21 @@ export default async function handler(req, res) {
 
     const token = await getGraphToken();
 
-    const results = await searchSharePoint(question, token);
+    // 1) Search inside VationGTM Documents drive
+    const results = await searchFileInDrive(question, token);
+
     if (!results.length) {
       res.status(200).json({
         answer:
-          "I couldn't find any matching SharePoint files for that question. Try a more specific file name or keyword.",
+          "I couldn't find any matching SharePoint files in the VationGTM Documents library for that question. Try including the exact file name or a key phrase from the document.",
         source: "sharepoint",
-        regionUsed: SHAREPOINT_REGION,
+        site: SP_SITE_PATH,
         sharePointResults: [],
       });
       return;
     }
 
+    // 2) Pick first supported file
     const supported = results.find((r) =>
       isSupportedExtension(getExtension(r.name))
     );
@@ -317,9 +359,9 @@ export default async function handler(req, res) {
     if (!supported) {
       res.status(200).json({
         answer:
-          "I found files for your search, but none of them are in a supported format for safe summarisation (allowed: .docx, .xlsx, .txt, .csv).",
+          "I found files for your search, but none are in a supported format for safe summarisation (allowed: .docx, .xlsx, .txt, .csv).",
         source: "sharepoint",
-        regionUsed: SHAREPOINT_REGION,
+        site: SP_SITE_PATH,
         sharePointResults: results,
       });
       return;
@@ -327,16 +369,20 @@ export default async function handler(req, res) {
 
     const ext = getExtension(supported.name);
 
-    const buffer = await downloadFileBuffer(token, supported.driveId, supported.id);
+    // 3) Download + extract
+    const buffer = await downloadFileBuffer(
+      token,
+      supported.driveId,
+      supported.id
+    );
     const extractedText = await extractTextFromBuffer(buffer, ext);
 
     if (!extractedText || !extractedText.trim()) {
-      // Very important: graceful, no crash path
       res.status(200).json({
         answer:
           "I could access the file but couldn't safely extract meaningful text from it in this environment. For this POC, only simple text-based documents (txt/csv and some docx/xlsx) are summarised.",
         source: "sharepoint",
-        regionUsed: SHAREPOINT_REGION,
+        site: SP_SITE_PATH,
         chosenFile: {
           name: supported.name,
           webUrl: supported.webUrl,
@@ -348,6 +394,7 @@ export default async function handler(req, res) {
       return;
     }
 
+    // 4) Summarise with Gemini
     const summary = await callGeminiSummary({
       question,
       fileName: supported.name,
@@ -357,7 +404,7 @@ export default async function handler(req, res) {
     res.status(200).json({
       answer: summary,
       source: "sharepoint",
-      regionUsed: SHAREPOINT_REGION,
+      site: SP_SITE_PATH,
       chosenFile: {
         name: supported.name,
         webUrl: supported.webUrl,
