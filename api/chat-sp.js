@@ -1,11 +1,12 @@
 // api/chat-sp.js
 //
-// SharePoint -> Graph Drive Search -> Gemini (SAFE MODE)
+// SharePoint -> Graph Drive Search -> Gemini (SAFE MODE) with CORS
 //
 // - Searches only inside the VationGTM site's "Documents" library
 // - Summarises only: .docx, .xlsx, .txt, .csv
 // - Uses dynamic imports for mammoth/xlsx (no crash if missing)
 // - Processes file content in-memory; never stores or logs it.
+// - CORS enabled for specific allowed origins (edit ALLOWED_ORIGINS below).
 
 const {
   GRAPH_TENANT_ID,
@@ -14,6 +15,37 @@ const {
   GEMINI_API_KEY,
 } = process.env;
 
+// 🔐 CORS: add all domains that are allowed to call this API
+// - Your Vercel frontend
+// - Your SharePoint domain
+// - Localhost (for dev, optional)
+const ALLOWED_ORIGINS = [
+  "https://ai-bot-demo-nine.vercel.app",          // your SP demo frontend (example)
+  "https://ai-bot-backend-black.vercel.app",      // same project frontend (if any)
+  "https://vationbangalore.sharepoint.com",       // SharePoint site
+  "http://localhost:3000"                         // local dev (optional)
+];
+
+function getAllowedOrigin(requestOrigin) {
+  if (!requestOrigin) return "";
+  if (ALLOWED_ORIGINS.includes(requestOrigin)) return requestOrigin;
+  return ""; // no CORS header if origin not allowed
+}
+
+function setCorsHeaders(res, origin) {
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+  // Only needed if you use cookies/credentials
+  // res.setHeader("Access-Control-Allow-Credentials", "true");
+}
+
 // -------- Gemini helper --------
 
 async function callGeminiSummary({ question, fileName, extractedText }) {
@@ -21,6 +53,10 @@ async function callGeminiSummary({ question, fileName, extractedText }) {
   const safeText =
     (extractedText || "").toString().slice(0, MAX_CHARS) ||
     "NO_CONTENT_EXTRACTED";
+
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not set");
+  }
 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
@@ -321,6 +357,16 @@ async function extractTextFromBuffer(buffer, ext) {
 // -------- Main handler --------
 
 export default async function handler(req, res) {
+  const requestOrigin = req.headers.origin || "";
+  const allowedOrigin = getAllowedOrigin(requestOrigin);
+  setCorsHeaders(res, allowedOrigin);
+
+  // Preflight
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
   if (req.method !== "POST") {
     res
       .status(405)
