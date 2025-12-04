@@ -1,12 +1,11 @@
 // api/chat-sp.js
 //
-// SharePoint -> Graph Drive Search -> Gemini (SAFE MODE) with CORS
+// SharePoint -> Graph Drive Search -> Gemini (SAFE MODE) with OPEN CORS (*)
 //
 // - Searches only inside the VationGTM site's "Documents" library
 // - Summarises only: .docx, .xlsx, .txt, .csv
-// - Uses dynamic imports for mammoth/xlsx (no crash if missing)
-// - Processes file content in-memory; never stores or logs it.
-// - CORS enabled for specific allowed origins (edit ALLOWED_ORIGINS below).
+// - Uses dynamic imports for mammoth/xlsx
+// - CORS: Access-Control-Allow-Origin: * (POC only)
 
 const {
   GRAPH_TENANT_ID,
@@ -15,35 +14,16 @@ const {
   GEMINI_API_KEY,
 } = process.env;
 
-// 🔐 CORS: add all domains that are allowed to call this API
-// - Your Vercel frontend
-// - Your SharePoint domain
-// - Localhost (for dev, optional)
-const ALLOWED_ORIGINS = [
-  "https://ai-bot-demo-nine.vercel.app",          // your SP demo frontend (example)
-  "https://ai-bot-backend-black.vercel.app",      // same project frontend (if any)
-  "https://vationbangalore.sharepoint.com",       // SharePoint site
-  "http://localhost:3000"                         // local dev (optional)
-];
+// -------- Simple CORS helpers --------
 
-function getAllowedOrigin(requestOrigin) {
-  if (!requestOrigin) return "";
-  if (ALLOWED_ORIGINS.includes(requestOrigin)) return requestOrigin;
-  return ""; // no CORS header if origin not allowed
-}
-
-function setCorsHeaders(res, origin) {
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
+function setCorsHeaders(res) {
+  // Open CORS for POC – ok for internal demo, not for production
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization"
   );
-  // Only needed if you use cookies/credentials
-  // res.setHeader("Access-Control-Allow-Credentials", "true");
 }
 
 // -------- Gemini helper --------
@@ -79,8 +59,6 @@ Rules:
 - Give a concise summary (5–8 bullet points or short paragraphs).
 - Call out any obvious risks, owners, milestones or deadlines if visible.
 - Do NOT invent data, contacts, or numbers.
-
-Provide the summary now.
 `.trim();
 
   const body = {
@@ -160,15 +138,10 @@ async function getGraphToken() {
 
 // -------- Site + Drive helpers (VationGTM) --------
 
-// Hard-coded for this POC:
-// Host: vationbangalore.sharepoint.com
-// Site path: /sites/VationGTM
 const SP_HOSTNAME = "vationbangalore.sharepoint.com";
 const SP_SITE_PATH = "/sites/VationGTM";
 
-// Find the site ID and the "Documents" library drive ID for VationGTM
 async function getSiteAndDriveIds(accessToken) {
-  // 1) Get site
   const siteUrl = `https://graph.microsoft.com/v1.0/sites/${SP_HOSTNAME}:${SP_SITE_PATH}?$select=id`;
   const siteResp = await fetch(siteUrl, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -183,7 +156,6 @@ async function getSiteAndDriveIds(accessToken) {
     throw new Error("VationGTM siteId not found in Graph response");
   }
 
-  // 2) Get drives for the site, pick the "Documents" library
   const drivesUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`;
   const drivesResp = await fetch(drivesUrl, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -201,7 +173,6 @@ async function getSiteAndDriveIds(accessToken) {
     throw new Error("No drives returned for VationGTM site");
   }
 
-  // Prefer the drive named "Documents" or driveType = documentLibrary
   let docsDrive =
     drivesData.value.find((d) => d.name === "Documents") ||
     drivesData.value.find((d) => d.driveType === "documentLibrary") ||
@@ -225,23 +196,18 @@ function isSupportedExtension(ext) {
   return ["docx", "xlsx", "txt", "csv"].includes(ext);
 }
 
-// Try to pull a "file-like" term from the question
 function buildSearchTerm(question) {
   if (!question) return "";
 
-  // 1) Text inside quotes
   const quoted = question.match(/["']([^"']+)["']/);
   if (quoted && quoted[1]) return quoted[1];
 
-  // 2) Phrase before "document" or "file"
   const docMatch = question.match(/summaris\w*\s+(.+?)\s+(document|file)/i);
   if (docMatch && docMatch[1]) return docMatch[1];
 
-  // 3) Fallback to whole question
   return question;
 }
 
-// Use Drive search limited to the VationGTM Documents drive
 async function searchFileInDrive(question, accessToken) {
   const { driveId } = await getSiteAndDriveIds(accessToken);
 
@@ -357,9 +323,8 @@ async function extractTextFromBuffer(buffer, ext) {
 // -------- Main handler --------
 
 export default async function handler(req, res) {
-  const requestOrigin = req.headers.origin || "";
-  const allowedOrigin = getAllowedOrigin(requestOrigin);
-  setCorsHeaders(res, allowedOrigin);
+  // CORS for every request
+  setCorsHeaders(res);
 
   // Preflight
   if (req.method === "OPTIONS") {
@@ -383,7 +348,6 @@ export default async function handler(req, res) {
 
     const token = await getGraphToken();
 
-    // 1) Search inside VationGTM Documents drive
     const results = await searchFileInDrive(question, token);
 
     if (!results.length) {
@@ -397,7 +361,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 2) Pick first supported file
     const supported = results.find((r) =>
       isSupportedExtension(getExtension(r.name))
     );
@@ -415,7 +378,6 @@ export default async function handler(req, res) {
 
     const ext = getExtension(supported.name);
 
-    // 3) Download + extract
     const buffer = await downloadFileBuffer(
       token,
       supported.driveId,
@@ -440,7 +402,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 4) Summarise with Gemini
     const summary = await callGeminiSummary({
       question,
       fileName: supported.name,
