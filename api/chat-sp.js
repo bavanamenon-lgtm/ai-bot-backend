@@ -1,6 +1,6 @@
 //
 // /api/chat-sp.js
-// ENTERPRISE-GRADE SHAREPOINT ASSISTANT (UPDATED WITH SAFE SEARCH TERM SANITISATION)
+// ENTERPRISE-GRADE SHAREPOINT ASSISTANT (UPDATED: KEYWORD-BASED SEARCH TERM)
 //
 // - Searches VationGTM "Documents" drive via Microsoft Graph
 // - Expands folders to find supported files inside
@@ -36,13 +36,13 @@ function isSupportedExtension(ext) {
   return ["txt", "csv", "docx", "xlsx", "pdf"].includes(ext);
 }
 
-// ---------- Search term extractor (UPDATED, SAFE) ----------
+// ---------- Search term extractor (UPDATED: SAFE + KEYWORDS) ----------
 
 function buildSearchTerm(question) {
   if (!question) return "";
   let q = question.trim();
 
-  // 1) Handle straight + curly quotes → use inside quotes if present
+  // 1) Quoted phrase wins
   const quoted = q.match(
     /["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]+)["'\u201C\u201D\u2018\u2019]/
   );
@@ -50,7 +50,7 @@ function buildSearchTerm(question) {
     q = quoted[1].trim();
   }
 
-  // 2) Explicit filename pattern
+  // 2) Explicit filename pattern wins
   const filenameMatch = q.match(/([A-Za-z0-9_\- ]+\.[A-Za-z0-9]{1,10})/);
   if (filenameMatch && filenameMatch[1]) {
     q = filenameMatch[1].trim();
@@ -64,7 +64,7 @@ function buildSearchTerm(question) {
     q = docMatch[1].trim();
   }
 
-  // 4) Remove common filler prefixes to bias towards the real topic
+  // 4) Remove common filler prefixes
   const prefixes = [
     "can you",
     "could you",
@@ -78,8 +78,10 @@ function buildSearchTerm(question) {
     "summarise",
     "summarize",
     "do we have any",
+    "do we have",
     "i need",
     "i want",
+    "is there",
   ];
   const lower = q.toLowerCase();
   for (const prefix of prefixes) {
@@ -89,11 +91,55 @@ function buildSearchTerm(question) {
     }
   }
 
-  // 5) Strip punctuation that can break Graph path or be rejected (? < > # & etc.)
-  //    This is what was causing: "A potentially dangerous Request.Path value was detected..."
+  // 5) Strip punctuation that can break Graph path (? < > # & etc.)
   q = q.replace(/[?<>#&]/g, " ").replace(/\s+/g, " ").trim();
 
-  // 6) Truncate to avoid insanely long queries
+  // 6) Keyword extraction: drop stopwords, keep only meaningful tokens
+  const stopWords = new Set([
+    "a",
+    "an",
+    "the",
+    "any",
+    "do",
+    "does",
+    "we",
+    "have",
+    "has",
+    "is",
+    "are",
+    "there",
+    "documents",
+    "document",
+    "docs",
+    "files",
+    "file",
+    "related",
+    "to",
+    "for",
+    "of",
+    "about",
+    "on",
+    "with",
+    "and",
+    "or",
+    "in",
+    "our",
+    "my",
+    "your",
+  ]);
+
+  const tokens = q
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  const keywords = tokens.filter((t) => !stopWords.has(t.toLowerCase()));
+
+  if (keywords.length) {
+    q = keywords.join(" ");
+  }
+
+  // 7) Truncate to avoid insanely long queries
   return q.slice(0, 200);
 }
 
@@ -175,7 +221,7 @@ async function getSiteAndDriveIds(accessToken) {
   return { siteId, driveId: drive.id };
 }
 
-// ---------- Graph: search + folder expansion (UPDATED to guard empty term) ----------
+// ---------- Graph: search + folder expansion ----------
 
 async function searchDriveForQuestion(question, token) {
   const { driveId } = await getSiteAndDriveIds(token);
@@ -208,7 +254,7 @@ async function searchDriveForQuestion(question, token) {
   }
 
   if (!resp.ok) {
-    console.error("[SP] Search ERROR:", data);
+    console.error("[SP] Search ERROR]:", data);
     throw new Error("Graph search API error");
   }
 
