@@ -1,6 +1,6 @@
 //
 // /api/chat-sp.js
-// ENTERPRISE-GRADE SHAREPOINT ASSISTANT
+// ENTERPRISE-GRADE SHAREPOINT ASSISTANT (UPDATED WITH SAFE SEARCH TERM SANITISATION)
 //
 // - Searches VationGTM "Documents" drive via Microsoft Graph
 // - Expands folders to find supported files inside
@@ -36,29 +36,35 @@ function isSupportedExtension(ext) {
   return ["txt", "csv", "docx", "xlsx", "pdf"].includes(ext);
 }
 
-// ---------- Search term extractor (robust) ----------
+// ---------- Search term extractor (UPDATED, SAFE) ----------
 
 function buildSearchTerm(question) {
   if (!question) return "";
   let q = question.trim();
 
-  // Handle straight + curly quotes
+  // 1) Handle straight + curly quotes → use inside quotes if present
   const quoted = q.match(
     /["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]+)["'\u201C\u201D\u2018\u2019]/
   );
-  if (quoted && quoted[1]) return quoted[1].trim();
+  if (quoted && quoted[1]) {
+    q = quoted[1].trim();
+  }
 
-  // Explicit filename pattern
+  // 2) Explicit filename pattern
   const filenameMatch = q.match(/([A-Za-z0-9_\- ]+\.[A-Za-z0-9]{1,10})/);
-  if (filenameMatch && filenameMatch[1]) return filenameMatch[1].trim();
+  if (filenameMatch && filenameMatch[1]) {
+    q = filenameMatch[1].trim();
+  }
 
-  // Phrases like "summarise X document/file"
+  // 3) Phrases like "summarise X document/file"
   const docMatch = q.match(
     /summaris\w*\s+(.+?)\s+(document|file|doc|docs|documents)/i
   );
-  if (docMatch && docMatch[1]) return docMatch[1].trim();
+  if (docMatch && docMatch[1]) {
+    q = docMatch[1].trim();
+  }
 
-  // Remove common filler prefixes to bias towards topic
+  // 4) Remove common filler prefixes to bias towards the real topic
   const prefixes = [
     "can you",
     "could you",
@@ -78,11 +84,16 @@ function buildSearchTerm(question) {
   const lower = q.toLowerCase();
   for (const prefix of prefixes) {
     if (lower.startsWith(prefix + " ")) {
-      return q.slice(prefix.length).trim().slice(0, 200);
+      q = q.slice(prefix.length).trim();
+      break;
     }
   }
 
-  // Fallback: truncated question
+  // 5) Strip punctuation that can break Graph path or be rejected (? < > # & etc.)
+  //    This is what was causing: "A potentially dangerous Request.Path value was detected..."
+  q = q.replace(/[?<>#&]/g, " ").replace(/\s+/g, " ").trim();
+
+  // 6) Truncate to avoid insanely long queries
   return q.slice(0, 200);
 }
 
@@ -164,12 +175,16 @@ async function getSiteAndDriveIds(accessToken) {
   return { siteId, driveId: drive.id };
 }
 
-// ---------- Graph: search + folder expansion ----------
+// ---------- Graph: search + folder expansion (UPDATED to guard empty term) ----------
 
 async function searchDriveForQuestion(question, token) {
   const { driveId } = await getSiteAndDriveIds(token);
 
   const term = buildSearchTerm(question);
+  if (!term) {
+    throw new Error("Search term is empty after sanitisation");
+  }
+
   const encoded = encodeURIComponent(term);
 
   console.log("[SP] Question:", question);
@@ -392,7 +407,7 @@ ${docBlocks}
 
 Instructions:
 - First, decide which single document is MOST relevant to the user's question.
-- If none are relevant, say clearly that you couldn't find a suitable document.
+- If none are relevant, say clearly that you couldn't find a suitable document and briefly mention what you did see.
 - If one is relevant, clearly state which document you are using (by name).
 - Then provide a concise, accurate summary (5–8 bullet points or short paragraphs).
 - Do NOT invent data. If something is not present in the text, do not assume it.
