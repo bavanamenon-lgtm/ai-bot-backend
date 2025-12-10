@@ -15,7 +15,7 @@ const loginUrl = SF_LOGIN_URL || 'https://login.salesforce.com';
 // ---- Gemini helper ----
 async function callGemini(prompt) {
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   const body = {
     contents: [
