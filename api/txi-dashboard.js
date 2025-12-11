@@ -18,8 +18,8 @@ export default async function handler(req, res) {
 
     // ---------- ENV VAR VALIDATION ----------
     const SN_URL = process.env.SN_TXI_URL;
-    const SN_USER = process.env.SN_USER;
-    const SN_PASS = process.env.SN_PASS;
+    const SN_USER = process.env.SN_USERNAME;
+    const SN_PASS = process.env.SN_PASSWORD;
 
     const SF_URL = process.env.SF_QUERY_URL;
     const SF_TOKEN = process.env.SF_TOKEN;
