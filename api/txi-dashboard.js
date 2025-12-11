@@ -1,205 +1,176 @@
-// /api/txi-dashboard.js
-
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Helper: choose model from env, default to 1.5-flash
-function getTxiModel() {
-  const modelName =
-    process.env.GEMINI_TXI_MODEL ||
-    "gemini-1.5-flash"; // keep it boring & stable
-  return genAI.getGenerativeModel({ model: modelName });
-}
-
-// ---- 1. Your existing data fetchers (stubbed here) ----
-
-async function fetchFromServiceNow() {
-  // TODO: replace with your real call
-  // Return exactly what you’re already returning to the UI
-  // I’m using your sample JSON structure:
-  return {
-    source: "ServiceNow",
-    generatedAt: "2025/06/11 11:06:51",
-    totalHighPriority: 78,
-    byPriority: [
-      { priority: "1", count: 72 },
-      { priority: "2", count: 6 },
-      { priority: "3", count: 105 },
-    ],
-    ebcIncidents: [],
-  };
-}
-
-async function fetchFromSalesforce() {
-  // TODO: plug in your jsforce/REST logic
-  return {
-    source: "Salesforce",
-    ebcAccount: {
-      id: "001gL00000YOfJsQAL",
-      name: "EBC HQ",
-      industry: "Manufacturing",
-      rating: "Hot",
-    },
-    atRiskSummary: {
-      opportunityCount: 2,
-      totalAmount: 360000,
-    },
-    atRiskOpportunities: [
-      {
-        id: "006gL00000FR428QAD",
-        name: "Lift Modernization Deal",
-        amount: 240000,
-        stage: "Prospecting",
-        closeDate: "2025-12-19",
-        probability: 10,
-      },
-      {
-        id: "006gL00000FR4i1QAD",
-        name: "IoT Annual Renewal",
-        amount: 120000,
-        stage: "Proposal/Price Quote",
-        closeDate: "2025-12-25",
-        probability: 30,
-      },
-    ],
-  };
-}
-
-async function fetchFromSharePoint(question) {
-  // TODO: call your /api/chat-sp endpoint
-  // For safety, keep the shape like your current response
-  return {
-    source: "SharePoint",
-    answer:
-      "I couldn't find any matching SharePoint files in the VationGTM Documents library for that question. Try using the exact file name or a strong keyword from inside the document.",
-    candidateFiles: [],
-  };
-}
-
-// ---- 2. Fallback summary generator (no Gemini) ----
-
-function buildFallbackSummary({ serviceNow, salesforce, sharePoint, question }) {
-  // Use the JSON to build a clean narrative similar to section 1.
-  const sn = serviceNow || {};
-  const sf = salesforce || {};
-  const sp = sharePoint || {};
-
-  const p1 = sn.byPriority?.find((p) => p.priority === "1")?.count ?? 0;
-  const p2 = sn.byPriority?.find((p) => p.priority === "2")?.count ?? 0;
-  const p3 = sn.byPriority?.find((p) => p.priority === "3")?.count ?? 0;
-
-  const acct = sf.ebcAccount;
-  const atRisk = sf.atRiskSummary;
-
-  const lines = [];
-
-  lines.push(
-    `Here is a leadership view of today’s biggest risks and impacts based on live system data.`
-  );
-
-  // Salesforce
-  if (acct && atRisk) {
-    lines.push(
-      `\n1. Revenue risk on key customer (Source: Salesforce)\n` +
-        `   - Account: ${acct.name} (Industry: ${acct.industry}, Rating: ${acct.rating})\n` +
-        `   - Open at-risk opportunities: ${atRisk.opportunityCount} deal(s) with total value around $${atRisk.totalAmount}\n`
-    );
-  }
-
-  // ServiceNow
-  if (sn.totalHighPriority != null) {
-    lines.push(
-      `2. High-priority IT incident load (Source: ServiceNow)\n` +
-        `   - High-priority incidents open: ${sn.totalHighPriority}\n` +
-        `   - Distribution by priority: P1: ${p1}, P2: ${p2}, P3: ${p3}\n`
-    );
-  }
-
-  // SharePoint
-  if (sp.source) {
-    lines.push(
-      `3. Knowledge / collaboration signals (Source: SharePoint)\n` +
-        `   - Assistant summary: ${sp.answer || "No clear documents found for this question."}`
-    );
-  }
-
-  return lines.join("");
-}
-
-// ---- 3. Main handler ----
+import axios from "axios";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Use POST with JSON body {question: '...'}" });
-  }
-
   try {
-    const { question } = req.body || {};
-    if (!question || typeof question !== "string") {
-      return res
-        .status(400)
-        .json({ error: "Missing 'question' in request body or not a string." });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Only POST allowed" });
     }
 
-    // Fetch all three systems in parallel
-    const [serviceNow, salesforce, sharePoint] = await Promise.all([
-      fetchFromServiceNow(),
-      fetchFromSalesforce(),
-      fetchFromSharePoint(question),
-    ]);
+    const { question } = req.body;
+    if (!question) {
+      return res.status(400).json({ error: "Missing question" });
+    }
 
-    let combinedAnswer = null;
-    let geminiError = null;
+    // -----------------------------
+    // ENV VARS
+    // -----------------------------
+    const {
+      GEMINI_API_KEY,
+      SN_URL,
+      SN_USERNAME,
+      SN_PASSWORD,
+      SF_USERNAME,
+      SF_PASSWORD,
+      SF_TOKEN,
+      SF_LOGIN_URL,
+      SP_CHAT_URL
+    } = process.env;
 
-    // 1) Try Gemini
+    // -----------------------------
+    // SERVICE NOW FETCH
+    // -----------------------------
+    let serviceNowData;
     try {
-      const model = getTxiModel();
-      const prompt = `
-You are an executive analyst. Summarize the organisation's top 3 operational issues
-and the business impact, using ONLY the JSON below.
-
-Question from leader:
-"${question}"
-
-ServiceNow JSON:
-${JSON.stringify(serviceNow, null, 2)}
-
-Salesforce JSON:
-${JSON.stringify(salesforce, null, 2)}
-
-SharePoint JSON:
-${JSON.stringify(sharePoint, null, 2)}
-
-Return a short leadership-style answer with clear bullets and headings.
-`;
-      const result = await model.generateContent(prompt);
-      combinedAnswer = result.response.text();
-    } catch (err) {
-      console.error("Gemini error in /api/txi-dashboard:", err);
-      geminiError =
-        err?.message || "Unknown Gemini error. Falling back to rule-based summary.";
-    }
-
-    // 2) If Gemini failed, use fallback
-    if (!combinedAnswer) {
-      combinedAnswer = buildFallbackSummary({
-        serviceNow,
-        salesforce,
-        sharePoint,
-        question,
+      const sn = await axios.get(`${SN_URL}/api/dtp/schindler_txi/incident_summary`, {
+        auth: { username: SN_USERNAME, password: SN_PASSWORD }
       });
+      serviceNowData = sn.data;
+    } catch (e) {
+      serviceNowData = { error: e.message, source: "ServiceNow" };
     }
 
+    // -----------------------------
+    // SALESFORCE FETCH
+    // -----------------------------
+    let salesforceData;
+    try {
+      const loginRes = await axios.post(`${SF_LOGIN_URL}/services/Soap/u/58.0`, {
+        username: SF_USERNAME,
+        password: SF_PASSWORD + SF_TOKEN
+      });
+
+      const sessionId =
+        loginRes.data.match(/<sessionId>(.*?)<\/sessionId>/)?.[1] || null;
+      const serverUrl =
+        loginRes.data.match(/<serverUrl>(.*?)<\/serverUrl>/)?.[1].replace(
+          "/services/Soap/u/58.0",
+          ""
+        );
+
+      const sf = axios.create({
+        baseURL: serverUrl,
+        headers: { Authorization: `Bearer ${sessionId}` }
+      });
+
+      const atRiskQuery = `
+        SELECT Id, Name, Amount, StageName, Probability, CloseDate
+        FROM Opportunity
+        WHERE Is_At_Risk__c = true
+      `;
+
+      const accQuery = `
+        SELECT Id, Name, Industry, Rating
+        FROM Account
+        WHERE Name = 'EBC HQ'
+        LIMIT 1
+      `;
+
+      const [accRes, riskRes] = await Promise.all([
+        sf.get(`/services/data/v58.0/query?q=${encodeURIComponent(accQuery)}`),
+        sf.get(`/services/data/v58.0/query?q=${encodeURIComponent(atRiskQuery)}`)
+      ]);
+
+      salesforceData = {
+        source: "Salesforce",
+        ebcAccount: accRes.data.records?.[0] || null,
+        atRiskOpportunities: riskRes.data.records || [],
+        atRiskSummary: {
+          opportunityCount: riskRes.data.records.length,
+          totalAmount: riskRes.data.records.reduce((t, r) => t + (r.Amount || 0), 0)
+        }
+      };
+    } catch (e) {
+      salesforceData = { source: "Salesforce", error: e.message };
+    }
+
+    // -----------------------------
+    // SHAREPOINT FETCH
+    // -----------------------------
+    let sharePointData;
+    try {
+      if (!SP_CHAT_URL) {
+        sharePointData = {
+          source: "SharePoint",
+          error: "SP_CHAT_URL env var not configured."
+        };
+      } else {
+        const spRes = await axios.post(SP_CHAT_URL, { question });
+        sharePointData = { source: "SharePoint", ...spRes.data };
+      }
+    } catch (e) {
+      sharePointData = { source: "SharePoint", error: e.message };
+    }
+
+    // -----------------------------
+    // PREPARE AI INPUT
+    // -----------------------------
+    const combinedRaw = {
+      serviceNow: serviceNowData,
+      salesforce: salesforceData,
+      sharePoint: sharePointData
+    };
+
+    // -----------------------------
+    // AI SUMMARY (Gemini 2.0 Flash Stable)
+    // -----------------------------
+    let combinedAnswer = null;
+    try {
+      const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+      const prompt = `
+You are generating one single executive answer based ONLY on the JSON data below.
+
+Question:
+${question}
+
+Data:
+${JSON.stringify(combinedRaw, null, 2)}
+
+Rules:
+- Make it extremely clear and leadership-friendly.
+- Prioritize SALES → IT → COLLABORATION insights.
+- If SharePoint has no insights, say it clearly but softly.
+- If ServiceNow has incidents, quantify risk.
+- If Salesforce has at-risk revenue, highlight impact.
+- Avoid hallucination.
+- If any system errored, mention the error politely.
+
+Generate a final leadership summary.
+`;
+
+      const ai = await model.generateContent(prompt);
+      combinedAnswer = ai.response.text();
+    } catch (e) {
+      combinedAnswer = null;
+    }
+
+    // -----------------------------
+    // FINAL RESPONSE
+    // -----------------------------
     return res.status(200).json({
       question,
-      combinedAnswer,
-      sources: { serviceNow, salesforce, sharePoint },
-      geminiError,
-      generatedAt: new Date().toISOString(),
+      combinedAnswer: combinedAnswer || "AI model failed. See raw outputs.",
+      sources: combinedRaw,
+      generatedAt: new Date().toISOString()
     });
-  } catch (e) {
-    console.error("Fatal error in /api/txi-dashboard:", e);
-    return res.status(500).json({ error: "Internal server error in txi-dashboard." });
+
+  } catch (error) {
+    console.error("TXI Dashboard Fatal Error:", error);
+    return res.status(500).json({
+      error: "TXI Dashboard failed",
+      detail: error.message
+    });
   }
 }
