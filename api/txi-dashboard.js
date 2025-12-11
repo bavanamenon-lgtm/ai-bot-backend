@@ -1,259 +1,230 @@
 // /api/txi-dashboard.js
-// Combined leadership view across ServiceNow, Salesforce and SharePoint
 
-import fetch from "node-fetch";
-import jsforce from "jsforce";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { NextResponse } from "next/server";
 
+// ----------------------
+// ENV VARIABLES REQUIRED
+// ----------------------
 const {
-  SN_BASE_URL,
-  SN_USER,
-  SN_PASS,
   SF_USERNAME,
   SF_PASSWORD,
   SF_TOKEN,
   SF_LOGIN_URL,
-  GEMINI_API_KEY,
+  SN_URL,
+  SN_USER,
+  SN_PASS,
   SP_CHAT_URL,
+  GEMINI_API_KEY
 } = process.env;
 
-// ---------- Helpers ----------
+// ----------------------
+// SALESFORCE CLIENT
+// ----------------------
+import jsforce from "jsforce";
 
-function ensureEnv(name) {
-  if (!process.env[name]) {
-    console.warn(`[txi-dashboard] Missing env var: ${name}`);
-  }
-}
-
-// Check required envs once at load time (won’t break, just logs)
-["SN_BASE_URL", "SN_USER", "SN_PASS", "SF_USERNAME", "SF_PASSWORD", "SF_TOKEN", "GEMINI_API_KEY"].forEach(
-  ensureEnv
-);
-
-// Safe wrapper so one system failing doesn’t kill the whole response
-async function safeCall(label, fn) {
+// Query Account + At-Risk Opportunities
+async function fetchSalesforceData() {
   try {
-    const data = await fn();
-    return { source: label, ...data };
-  } catch (err) {
-    console.error(`[txi-dashboard] ${label} error`, err);
-    return { source: label, error: err.message || String(err) };
-  }
-}
+    const conn = new jsforce.Connection({
+      loginUrl: SF_LOGIN_URL,
+    });
 
-// ---------- ServiceNow ----------
+    await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
 
-async function fetchServiceNow() {
-  if (!SN_BASE_URL || !SN_USER || !SN_PASS) {
-    throw new Error("ServiceNow env vars missing (SN_BASE_URL / SN_USER / SN_PASS)");
-  }
+    // 1) Get EBC Account
+    const account = await conn.query(`
+      SELECT Id, Name, Industry, Rating
+      FROM Account
+      WHERE Name = 'EBC HQ'
+      LIMIT 1
+    `);
 
-  const url = `${SN_BASE_URL.replace(/\/$/, "")}/api/dtp/schindler_txi/incident_summary`;
-  const auth = Buffer.from(`${SN_USER}:${SN_PASS}`).toString("base64");
+    if (account.totalSize === 0) {
+      return { source: "Salesforce", error: "EBC account not found." };
+    }
 
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      Accept: "application/json",
-    },
-  });
+    const acc = account.records[0];
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`ServiceNow API error ${resp.status}: ${text}`);
-  }
+    // 2) Fetch at-risk opportunities
+    const opps = await conn.query(`
+      SELECT Id, Name, Amount, StageName, CloseDate, Probability
+      FROM Opportunity
+      WHERE AccountId = '${acc.Id}' AND At_Risk__c = TRUE
+    `);
 
-  const data = await resp.json();
-  // Make sure there is a "source" field for consistency
-  return { ...data, source: "ServiceNow" };
-}
+    const totalAmount = opps.records.reduce((t, o) => t + (o.Amount || 0), 0);
 
-// ---------- Salesforce ----------
-
-async function fetchSalesforce() {
-  if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN) {
-    throw new Error("Salesforce env vars missing (SF_USERNAME / SF_PASSWORD / SF_TOKEN)");
-  }
-
-  const conn = new jsforce.Connection({
-    loginUrl: SF_LOGIN_URL || "https://login.salesforce.com",
-  });
-
-  // Standard username + password + token combo
-  await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
-
-  // 1) Get a strategic account (EBC HQ you created)
-  const acctRes = await conn.query(
-    "SELECT Id, Name, Industry, Rating FROM Account WHERE Name = 'EBC HQ' LIMIT 1"
-  );
-
-  const acctRec = acctRes.records && acctRes.records[0];
-  const ebcAccount = acctRec
-    ? {
-        id: acctRec.Id,
-        name: acctRec.Name,
-        industry: acctRec.Industry,
-        rating: acctRec.Rating,
-      }
-    : null;
-
-  let atRiskOpportunities = [];
-  if (ebcAccount) {
-    // 2) Get opportunities for that account
-    const oppRes = await conn.query(
-      `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-       FROM Opportunity
-       WHERE AccountId = '${ebcAccount.id}'`
-    );
-
-    // Treat low-probability deals as “at risk” (<= 30%)
-    atRiskOpportunities = (oppRes.records || [])
-      .filter((o) => typeof o.Probability === "number" && o.Probability <= 30)
-      .map((o) => ({
+    return {
+      source: "Salesforce",
+      ebcAccount: {
+        id: acc.Id,
+        name: acc.Name,
+        industry: acc.Industry,
+        rating: acc.Rating
+      },
+      atRiskSummary: {
+        opportunityCount: opps.totalSize,
+        totalAmount
+      },
+      atRiskOpportunities: opps.records.map(o => ({
         id: o.Id,
         name: o.Name,
         amount: o.Amount,
         stage: o.StageName,
         closeDate: o.CloseDate,
-        probability: o.Probability,
-      }));
-  }
-
-  const totalAmount = atRiskOpportunities.reduce(
-    (sum, o) => sum + (Number(o.amount) || 0),
-    0
-  );
-
-  const atRiskSummary = {
-    opportunityCount: atRiskOpportunities.length,
-    totalAmount,
-  };
-
-  return {
-    source: "Salesforce",
-    ebcAccount,
-    atRiskSummary,
-    atRiskOpportunities,
-  };
-}
-
-// ---------- SharePoint (optional) ----------
-
-async function fetchSharePoint(question) {
-  if (!SP_CHAT_URL) {
-    // Don’t break the whole flow – just report the config gap
-    return {
-      source: "SharePoint",
-      error: "SP_CHAT_URL env var not configured.",
+        probability: o.Probability
+      }))
     };
+
+  } catch (err) {
+    return { source: "Salesforce", error: err.message };
   }
-
-  const resp = await fetch(SP_CHAT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`SharePoint chat error ${resp.status}: ${text}`);
-  }
-
-  // Expecting something like { answer: "...", usedFiles: [...], candidateFiles: [...] }
-  const data = await resp.json();
-  return { source: "SharePoint", ...data };
 }
 
-// ---------- Gemini summarisation ----------
 
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+// ----------------------
+// SERVICENOW CLIENT
+// ----------------------
+async function fetchServiceNowData() {
+  try {
+    const url = `${SN_URL}/api/dtp/schindler_txi/incident_summary`;
 
-async function generateCombinedAnswer(question, sources) {
-  if (!genAI) {
-    return "Gemini API key not configured. Cannot generate combined leadership view.";
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": "Basic " + Buffer.from(`${SN_USER}:${SN_PASS}`).toString("base64"),
+        "Accept": "application/json"
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error(`ServiceNow error ${res.status}`);
+    }
+
+    const json = await res.json();
+    return json;
+
+  } catch (err) {
+    return { source: "ServiceNow", error: err.message };
   }
-
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const prompt = `
-You are an executive assistant creating a leadership view for a CEO.
-
-The CEO's question is:
-"${question}"
-
-You have JSON data from three systems:
-
-ServiceNow:
-${JSON.stringify(sources.serviceNow, null, 2)}
-
-Salesforce:
-${JSON.stringify(sources.salesforce, null, 2)}
-
-SharePoint:
-${JSON.stringify(sources.sharePoint, null, 2)}
-
-Task:
-- Identify today's top ~3 operational issues or risks.
-- Explain clearly the *business impact* of each issue.
-- Explicitly reference which system each insight came from (ServiceNow, Salesforce, SharePoint).
-- Write in concise, leadership-level language, max 5 short bullet points plus a 1–2 sentence intro.
-- If any system returned an error, treat that as a visibility / data-quality risk, not a technical stack trace.
-`;
-
-  const result = await model.generateContent(prompt);
-  const resp = result.response;
-  return resp.text();
 }
 
-// ---------- API handler ----------
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res
-      .status(405)
-      .json({ error: 'Use POST with JSON body { "question": "..." }' });
-    return;
-  }
-
-  let question;
+// ----------------------
+// SHAREPOINT CLIENT
+// ----------------------
+async function fetchSharePointData(question) {
   try {
-    ({ question } = req.body || {});
-  } catch {
-    // In case body parsing fails for any reason
-    question = undefined;
-  }
+    if (!SP_CHAT_URL) {
+      return { source: "SharePoint", error: "SP_CHAT_URL env var not configured." };
+    }
 
-  if (typeof question !== "string" || !question.trim()) {
-    res
-      .status(400)
-      .json({ error: 'Missing "question" in request body or not a string.' });
-    return;
-  }
+    const res = await fetch(SP_CHAT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question })
+    });
 
+    if (!res.ok) {
+      throw new Error(`SharePoint returned ${res.status}`);
+    }
+
+    return await res.json();
+
+  } catch (err) {
+    return { source: "SharePoint", error: err.message };
+  }
+}
+
+
+// ----------------------
+// GEMINI — COMBINE ANSWER
+// ----------------------
+async function combineWithGemini(question, sources) {
   try {
-    // Call all three systems in parallel
-    const [serviceNow, salesforce, sharePoint] = await Promise.all([
-      safeCall("ServiceNow", () => fetchServiceNow()),
-      safeCall("Salesforce", () => fetchSalesforce()),
-      safeCall("SharePoint", () => fetchSharePoint(question)),
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: `
+You are an enterprise AI assistant. Summarize the three-system data into a leadership-level output.
+
+Question: ${question}
+
+Data:
+${JSON.stringify(sources, null, 2)}
+
+Return a clear executive summary with traceability to each system.
+`
+            }
+          ]
+        }
+      ]
+    };
+
+    const gemRes = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" +
+        GEMINI_API_KEY,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const gemJson = await gemRes.json();
+
+    const text =
+      gemJson?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Could not generate answer.";
+
+    return text;
+
+  } catch (err) {
+    return "Gemini summarization failed: " + err.message;
+  }
+}
+
+
+// ----------------------
+// MAIN API HANDLER
+// ----------------------
+export async function POST(req) {
+  try {
+    const body = await req.json();
+    const question = body.question;
+
+    if (!question) {
+      return NextResponse.json(
+        { error: "Missing 'question' in request body." },
+        { status: 400 }
+      );
+    }
+
+    // Run all 3 systems in parallel
+    const [sf, sn, sp] = await Promise.all([
+      fetchSalesforceData(),
+      fetchServiceNowData(),
+      fetchSharePointData(question)
     ]);
 
-    const sources = { serviceNow, salesforce, sharePoint };
+    const sources = { salesforce: sf, serviceNow: sn, sharePoint: sp };
 
-    const combinedAnswer = await generateCombinedAnswer(question, sources);
+    // Final combined answer from Gemini
+    const combinedAnswer = await combineWithGemini(question, sources);
 
-    res.status(200).json({
+    return NextResponse.json({
       question,
       combinedAnswer,
       sources,
-      generatedAt: new Date().toISOString(),
+      generatedAt: new Date().toISOString()
     });
+
   } catch (err) {
-    console.error("[txi-dashboard] Fatal error", err);
-    res.status(500).json({
-      error: "Failed to generate leadership dashboard answer.",
-      detail: err.message || String(err),
-    });
+    return NextResponse.json(
+      { error: err.message || "Server error" },
+      { status: 500 }
+    );
   }
 }
