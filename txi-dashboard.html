@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Schindler – TXI Leadership Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f3f5fb;
+      display: flex;
+      justify-content: center;
+    }
+    .app {
+      width: 100%;
+      max-width: 960px;
+      min-height: 100vh;
+      box-sizing: border-box;
+      padding: 24px 16px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .header {
+      background: #001639;
+      color: #fff;
+      padding: 14px 18px;
+      border-radius: 10px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .header p {
+      margin: 4px 0 0 0;
+      font-size: 13px;
+      opacity: 0.85;
+    }
+    .main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr);
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(15, 35, 95, 0.12);
+      padding: 14px 14px 16px;
+      box-sizing: border-box;
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      color: #032d60;
+    }
+    .card p.subtle {
+      margin: 0 0 10px;
+      font-size: 12px;
+      color: #5e6c84;
+    }
+    textarea {
+      width: 100%;
+      min-height: 80px;
+      resize: vertical;
+      border-radius: 8px;
+      border: 1px solid #d0d7e6;
+      padding: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 7px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      background: #0176d3;
+      color: #fff;
+    }
+    button.secondary {
+      background: #e3e8f0;
+      color: #032d60;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .answer {
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      color: #051726;
+    }
+    .answer h3 {
+      font-size: 14px;
+      margin: 10px 0 4px;
+      color: #032d60;
+    }
+    .meta {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid #edf0f7;
+      font-size: 11px;
+      color: #6b778c;
+    }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .pill {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #e5f2ff;
+      color: #032d60;
+    }
+    .error {
+      color: #b71c1c;
+      font-size: 12px;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>Schindler Total Intelligence – Leadership Console</h1>
+    <p>
+      Ask a single question and combine live signals from ServiceNow, Salesforce and SharePoint
+      into one executive view.
+    </p>
+  </div>
+
+  <div class="main">
+    <!-- LEFT: Question + Controls -->
+    <div class="card">
+      <h2>Ask the organisation one question</h2>
+      <p class="subtle">
+        Example: <strong>What are the top 3 operational issues I should care about today, and what’s the business impact?</strong>
+      </p>
+      <textarea id="questionInput"></textarea>
+      <div class="actions">
+        <button type="button" class="secondary" id="useExampleBtn">Use example question</button>
+        <button type="button" id="askBtn">Ask</button>
+      </div>
+      <div id="errorBox" class="error" style="display:none;"></div>
+    </div>
+
+    <!-- RIGHT: Answer -->
+    <div class="card">
+      <h2>Combined view across systems</h2>
+      <p class="subtle">AI assistant answer, with traceability to each source system.</p>
+      <div id="answerBox" class="answer">
+        <em>Waiting for a question…</em>
+      </div>
+      <div id="metaBox" class="meta" style="display:none;">
+        <div>Signals used:</div>
+        <div class="pill-row" id="pillRow"></div>
+        <div id="timestampRow"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API_URL = "/api/txi-dashboard"; // same origin as this HTML
+
+  const questionInput = document.getElementById("questionInput");
+  const askBtn = document.getElementById("askBtn");
+  const useExampleBtn = document.getElementById("useExampleBtn");
+  const answerBox = document.getElementById("answerBox");
+  const metaBox = document.getElementById("metaBox");
+  const pillRow = document.getElementById("pillRow");
+  const timestampRow = document.getElementById("timestampRow");
+  const errorBox = document.getElementById("errorBox");
+
+  const EXAMPLE_QUESTION =
+    "What are the top 3 operational issues I should care about today, and what’s the business impact?";
+
+  useExampleBtn.addEventListener("click", () => {
+    questionInput.value = EXAMPLE_QUESTION;
+  });
+
+  askBtn.addEventListener("click", async () => {
+    const q = questionInput.value.trim();
+    if (!q) return;
+
+    askBtn.disabled = true;
+    useExampleBtn.disabled = true;
+    errorBox.style.display = "none";
+    errorBox.textContent = "";
+    answerBox.innerHTML = "<em>Thinking…</em>";
+    metaBox.style.display = "none";
+
+    try {
+      const resp = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q })
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error("Backend error: " + text.slice(0, 200));
+      }
+
+      const data = await resp.json();
+
+      const combined = data.combinedAnswer || "No combined answer returned.";
+      answerBox.textContent = combined;
+
+      // Source pills
+      pillRow.innerHTML = "";
+      if (data.sources) {
+        if (data.sources.serviceNow) {
+          const p = document.createElement("div");
+          p.className = "pill";
+          p.textContent = "ServiceNow";
+          pillRow.appendChild(p);
+        }
+        if (data.sources.salesforce) {
+          const p = document.createElement("div");
+          p.className = "pill";
+          p.textContent = "Salesforce";
+          pillRow.appendChild(p);
+        }
+        if (data.sources.sharePoint) {
+          const p = document.createElement("div");
+          p.className = "pill";
+          p.textContent = "SharePoint";
+          pillRow.appendChild(p);
+        }
+      }
+
+      const ts = data.generatedAt || new Date().toISOString();
+      timestampRow.textContent = "Generated at: " + ts;
+      metaBox.style.display = "block";
+
+    } catch (err) {
+      console.error(err);
+      answerBox.innerHTML = "<em>Could not generate an answer.</em>";
+      errorBox.textContent = err.message;
+      errorBox.style.display = "block";
+    } finally {
+      askBtn.disabled = false;
+      useExampleBtn.disabled = false;
+    }
+  });
+
+  // Optional: preload example question
+  questionInput.value = EXAMPLE_QUESTION;
+</script>
+</body>
+</html>
