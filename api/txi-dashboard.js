@@ -237,7 +237,7 @@ async function callGemini(question, sources) {
     };
   }
 
-  const model = GEMINI_MODEL || "gemini-1.5-flash";
+  const model = GEMINI_MODEL || "gemini-2.0-pro-exp-02-05";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
   const prompt = `
