@@ -70,7 +70,7 @@ async function fetchSalesforceView() {
     await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
 
     // IMPORTANT: adjust these three field API names if your org uses different ones.
-    const EBC_FIELD = "Is_EBC_Account__c";
+    const EBC_FIELD = "Is_EBC__c";
     const RISK_FLAG_FIELD = "Risk_Flag__c";
     const AT_RISK_FIELD = "At_Risk__c";
 
