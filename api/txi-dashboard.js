@@ -1,31 +1,54 @@
-// api/txi-dashboard.js
-// Combined leadership view across ServiceNow, Salesforce and SharePoint.
+// /api/txi-dashboard.js
+// Combined leadership view across ServiceNow, Salesforce and SharePoint
 
 import fetch from "node-fetch";
 import jsforce from "jsforce";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const {
   SN_BASE_URL,
   SN_USER,
   SN_PASS,
-
   SF_USERNAME,
   SF_PASSWORD,
   SF_TOKEN,
   SF_LOGIN_URL,
-
-  // Full URL of your SharePoint Q&A endpoint
+  GEMINI_API_KEY,
   SP_CHAT_URL,
-
-  GEMINI_API_KEY, // not used right now, but kept for later
 } = process.env;
 
-// -----------------------------
-// Helper: ServiceNow summary
-// -----------------------------
-async function getServiceNowSummary() {
-  const url = `${SN_BASE_URL}/api/dtp/schindler_txi/incident_summary`;
+// ---------- Helpers ----------
 
+function ensureEnv(name) {
+  if (!process.env[name]) {
+    console.warn(`[txi-dashboard] Missing env var: ${name}`);
+  }
+}
+
+// Check required envs once at load time (won’t break, just logs)
+["SN_BASE_URL", "SN_USER", "SN_PASS", "SF_USERNAME", "SF_PASSWORD", "SF_TOKEN", "GEMINI_API_KEY"].forEach(
+  ensureEnv
+);
+
+// Safe wrapper so one system failing doesn’t kill the whole response
+async function safeCall(label, fn) {
+  try {
+    const data = await fn();
+    return { source: label, ...data };
+  } catch (err) {
+    console.error(`[txi-dashboard] ${label} error`, err);
+    return { source: label, error: err.message || String(err) };
+  }
+}
+
+// ---------- ServiceNow ----------
+
+async function fetchServiceNow() {
+  if (!SN_BASE_URL || !SN_USER || !SN_PASS) {
+    throw new Error("ServiceNow env vars missing (SN_BASE_URL / SN_USER / SN_PASS)");
+  }
+
+  const url = `${SN_BASE_URL.replace(/\/$/, "")}/api/dtp/schindler_txi/incident_summary`;
   const auth = Buffer.from(`${SN_USER}:${SN_PASS}`).toString("base64");
 
   const resp = await fetch(url, {
@@ -37,88 +60,89 @@ async function getServiceNowSummary() {
   });
 
   if (!resp.ok) {
-    throw new Error(`ServiceNow API error: ${resp.status} ${resp.statusText}`);
+    const text = await resp.text().catch(() => "");
+    throw new Error(`ServiceNow API error ${resp.status}: ${text}`);
   }
 
   const data = await resp.json();
-  return {
-    source: "ServiceNow",
-    ...data,
-  };
+  // Make sure there is a "source" field for consistency
+  return { ...data, source: "ServiceNow" };
 }
 
-// -----------------------------
-// Helper: Salesforce summary
-// -----------------------------
-async function getSalesforceSummary() {
+// ---------- Salesforce ----------
+
+async function fetchSalesforce() {
+  if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN) {
+    throw new Error("Salesforce env vars missing (SF_USERNAME / SF_PASSWORD / SF_TOKEN)");
+  }
+
   const conn = new jsforce.Connection({
     loginUrl: SF_LOGIN_URL || "https://login.salesforce.com",
   });
 
+  // Standard username + password + token combo
   await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
 
-  // 1) Find the EBC HQ account by name (no custom fields!)
-  const accountResult = await conn.query(
-    "SELECT Id, Name, Industry, Rating " +
-      "FROM Account " +
-      "WHERE Name = 'EBC HQ' " +
-      "LIMIT 1"
+  // 1) Get a strategic account (EBC HQ you created)
+  const acctRes = await conn.query(
+    "SELECT Id, Name, Industry, Rating FROM Account WHERE Name = 'EBC HQ' LIMIT 1"
   );
 
-  if (!accountResult.records.length) {
-    return {
-      source: "Salesforce",
-      error: "No account called 'EBC HQ' found in Salesforce.",
-    };
+  const acctRec = acctRes.records && acctRes.records[0];
+  const ebcAccount = acctRec
+    ? {
+        id: acctRec.Id,
+        name: acctRec.Name,
+        industry: acctRec.Industry,
+        rating: acctRec.Rating,
+      }
+    : null;
+
+  let atRiskOpportunities = [];
+  if (ebcAccount) {
+    // 2) Get opportunities for that account
+    const oppRes = await conn.query(
+      `SELECT Id, Name, Amount, StageName, CloseDate, Probability
+       FROM Opportunity
+       WHERE AccountId = '${ebcAccount.id}'`
+    );
+
+    // Treat low-probability deals as “at risk” (<= 30%)
+    atRiskOpportunities = (oppRes.records || [])
+      .filter((o) => typeof o.Probability === "number" && o.Probability <= 30)
+      .map((o) => ({
+        id: o.Id,
+        name: o.Name,
+        amount: o.Amount,
+        stage: o.StageName,
+        closeDate: o.CloseDate,
+        probability: o.Probability,
+      }));
   }
 
-  const account = accountResult.records[0];
-
-  // 2) Find open / future opportunities on that account
-  const oppResult = await conn.query(
-    "SELECT Id, Name, Amount, StageName, CloseDate, Probability " +
-      "FROM Opportunity " +
-      `WHERE AccountId = '${account.Id}' ` +
-      "AND IsClosed = false " +
-      "AND CloseDate >= TODAY"
+  const totalAmount = atRiskOpportunities.reduce(
+    (sum, o) => sum + (Number(o.amount) || 0),
+    0
   );
 
-  const opps = oppResult.records || [];
-
-  // Treat all open opps as “at risk” for the POC
-  let totalAtRiskAmount = 0;
-  opps.forEach((o) => {
-    if (o.Amount) totalAtRiskAmount += o.Amount;
-  });
+  const atRiskSummary = {
+    opportunityCount: atRiskOpportunities.length,
+    totalAmount,
+  };
 
   return {
     source: "Salesforce",
-    ebcAccount: {
-      id: account.Id,
-      name: account.Name,
-      industry: account.Industry,
-      rating: account.Rating,
-    },
-    atRiskSummary: {
-      opportunityCount: opps.length,
-      totalAmount: totalAtRiskAmount,
-    },
-    atRiskOpportunities: opps.map((o) => ({
-      id: o.Id,
-      name: o.Name,
-      amount: o.Amount,
-      stage: o.StageName,
-      closeDate: o.CloseDate,
-      probability: o.Probability,
-    })),
+    ebcAccount,
+    atRiskSummary,
+    atRiskOpportunities,
   };
 }
 
-// -----------------------------
-// Helper: SharePoint / document insight
-// -----------------------------
-async function getSharePointSummary(question) {
+// ---------- SharePoint (optional) ----------
+
+async function fetchSharePoint(question) {
   if (!SP_CHAT_URL) {
+    // Don’t break the whole flow – just report the config gap
     return {
       source: "SharePoint",
       error: "SP_CHAT_URL env var not configured.",
@@ -127,136 +151,109 @@ async function getSharePointSummary(question) {
 
   const resp = await fetch(SP_CHAT_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      // You can tune this sub-question later
-      question:
-        "Do we have any documents or plans related to risks, budget, or deals that leadership should know about?",
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
   });
 
   if (!resp.ok) {
-    throw new Error(
-      `SharePoint chat API error: ${resp.status} ${resp.statusText}`
-    );
+    const text = await resp.text().catch(() => "");
+    throw new Error(`SharePoint chat error ${resp.status}: ${text}`);
   }
 
+  // Expecting something like { answer: "...", usedFiles: [...], candidateFiles: [...] }
   const data = await resp.json();
-  return {
-    source: "SharePoint",
-    ...data,
-  };
+  return { source: "SharePoint", ...data };
 }
 
-// -----------------------------
-// Build a simple combined answer
-// -----------------------------
-function buildCombinedAnswer({ question, sn, sf, sp }) {
-  let lines = [];
+// ---------- Gemini summarisation ----------
 
-  lines.push("Here is a leadership view of today’s biggest risks and impacts:\n");
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
-  // 1) Salesforce – revenue risk
-  if (sf && !sf.error && sf.atRiskSummary) {
-    const count = sf.atRiskSummary.opportunityCount;
-    const amt = sf.atRiskSummary.totalAmount || 0;
-
-    lines.push(
-      `1. Revenue risk on key customer account (Source: Salesforce)\n` +
-        `   - Account: ${sf.ebcAccount?.name || "N/A"} (Industry: ${
-          sf.ebcAccount?.industry || "N/A"
-        }, Rating: ${sf.ebcAccount?.rating || "N/A"})\n` +
-        `   - Open opportunities: ${count} deal(s) with total value around $${amt.toLocaleString()}\n` +
-        `   - Leadership impact: Losing or delaying these deals directly impacts revenue and the relationship with this strategic account.\n`
-    );
-  } else {
-    lines.push(
-      `1. Salesforce configuration gap (Source: Salesforce)\n` +
-        `   - Impact: ${sf?.error || "Salesforce data is not yet available for this console."}\n`
-    );
+async function generateCombinedAnswer(question, sources) {
+  if (!genAI) {
+    return "Gemini API key not configured. Cannot generate combined leadership view.";
   }
 
-  // 2) ServiceNow – high-priority incidents
-  if (sn && !sn.error && typeof sn.totalHighPriority === "number") {
-    lines.push(
-      `2. High-priority IT incident load (Source: ServiceNow)\n` +
-        `   - High-priority incidents open: ${sn.totalHighPriority}\n` +
-        `   - Distribution by priority: ${sn.byPriority
-          .map((p) => `P${p.priority}: ${p.count}`)
-          .join(", ")}\n` +
-        `   - Leadership impact: Persistent high-priority incidents put uptime, employee productivity and customer experience at risk.\n`
-    );
-  } else {
-    lines.push(
-      `2. IT visibility gap (Source: ServiceNow)\n` +
-        `   - Impact: ${sn?.error || "Incident summary is not available; IT health is opaque at the moment."}\n`
-    );
-  }
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  // 3) SharePoint – documentation / execution risk
-  if (sp && !sp.error && sp.answer) {
-    lines.push(
-      `3. Knowledge and execution signals (Source: SharePoint)\n` +
-        `   - Summary of most relevant document(s): ${sp.answer}\n` +
-        `   - Leadership impact: These docs show how risks, budgets or deals are being tracked today; gaps here translate to execution risk.\n`
-    );
-  } else {
-    lines.push(
-      `3. Collaboration / knowledge visibility gap (Source: SharePoint)\n` +
-        `   - Impact: ${sp?.error || "No relevant documents could be surfaced for this question."}\n`
-    );
-  }
+  const prompt = `
+You are an executive assistant creating a leadership view for a CEO.
 
-  return lines.join("\n");
+The CEO's question is:
+"${question}"
+
+You have JSON data from three systems:
+
+ServiceNow:
+${JSON.stringify(sources.serviceNow, null, 2)}
+
+Salesforce:
+${JSON.stringify(sources.salesforce, null, 2)}
+
+SharePoint:
+${JSON.stringify(sources.sharePoint, null, 2)}
+
+Task:
+- Identify today's top ~3 operational issues or risks.
+- Explain clearly the *business impact* of each issue.
+- Explicitly reference which system each insight came from (ServiceNow, Salesforce, SharePoint).
+- Write in concise, leadership-level language, max 5 short bullet points plus a 1–2 sentence intro.
+- If any system returned an error, treat that as a visibility / data-quality risk, not a technical stack trace.
+`;
+
+  const result = await model.generateContent(prompt);
+  const resp = result.response;
+  return resp.text();
 }
 
-// -----------------------------
-// API handler
-// -----------------------------
+// ---------- API handler ----------
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res
+    res
       .status(405)
       .json({ error: 'Use POST with JSON body { "question": "..." }' });
+    return;
+  }
+
+  let question;
+  try {
+    ({ question } = req.body || {});
+  } catch {
+    // In case body parsing fails for any reason
+    question = undefined;
+  }
+
+  if (typeof question !== "string" || !question.trim()) {
+    res
+      .status(400)
+      .json({ error: 'Missing "question" in request body or not a string.' });
+    return;
   }
 
   try {
-    const { question } = req.body || {};
-    if (!question || typeof question !== "string") {
-      return res.status(400).json({
-        error: 'Missing "question" in request body or not a string.',
-      });
-    }
-
-    // Run all three in parallel
-    const [sn, sf, sp] = await Promise.all([
-      getServiceNowSummary().catch((e) => ({ source: "ServiceNow", error: e.message })),
-      getSalesforceSummary().catch((e) => ({ source: "Salesforce", error: e.message })),
-      getSharePointSummary(question).catch((e) => ({
-        source: "SharePoint",
-        error: e.message,
-      })),
+    // Call all three systems in parallel
+    const [serviceNow, salesforce, sharePoint] = await Promise.all([
+      safeCall("ServiceNow", () => fetchServiceNow()),
+      safeCall("Salesforce", () => fetchSalesforce()),
+      safeCall("SharePoint", () => fetchSharePoint(question)),
     ]);
 
-    const combinedAnswer = buildCombinedAnswer({ question, sn, sf, sp });
+    const sources = { serviceNow, salesforce, sharePoint };
 
-    return res.status(200).json({
+    const combinedAnswer = await generateCombinedAnswer(question, sources);
+
+    res.status(200).json({
       question,
       combinedAnswer,
-      sources: {
-        serviceNow: sn,
-        salesforce: sf,
-        sharePoint: sp,
-      },
+      sources,
       generatedAt: new Date().toISOString(),
     });
   } catch (err) {
-    console.error("txi-dashboard error:", err);
-    return res.status(500).json({
-      error: "Internal error in txi-dashboard.",
-      detail: err.message,
+    console.error("[txi-dashboard] Fatal error", err);
+    res.status(500).json({
+      error: "Failed to generate leadership dashboard answer.",
+      detail: err.message || String(err),
     });
   }
 }
