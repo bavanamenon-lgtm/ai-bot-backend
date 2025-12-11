@@ -2,93 +2,106 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Schindler – TXI Leadership Console</title>
+  <title>Schindler Total Intelligence – Leadership Console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       margin: 0;
       padding: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f3f5fb;
-      display: flex;
-      justify-content: center;
+      background: #f5f7fb;
     }
-    .app {
-      width: 100%;
-      max-width: 960px;
-      min-height: 100vh;
-      box-sizing: border-box;
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
       padding: 24px 16px 40px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
     }
-    .header {
+    .hero {
       background: #001639;
       color: #fff;
-      padding: 14px 18px;
-      border-radius: 10px;
+      padding: 18px 20px;
+      border-radius: 12px;
+      margin-bottom: 18px;
     }
-    .header h1 {
+    .hero h1 {
+      margin: 0 0 4px 0;
+      font-size: 22px;
+    }
+    .hero p {
       margin: 0;
-      font-size: 18px;
-    }
-    .header p {
-      margin: 4px 0 0 0;
       font-size: 13px;
-      opacity: 0.85;
+      opacity: 0.8;
     }
-    .main {
+    .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr);
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr);
       gap: 16px;
-      align-items: flex-start;
+    }
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
     }
     .card {
       background: #ffffff;
-      border-radius: 10px;
-      box-shadow: 0 1px 3px rgba(15, 35, 95, 0.12);
-      padding: 14px 14px 16px;
-      box-sizing: border-box;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.04);
+      display: flex;
+      flex-direction: column;
+      min-height: 260px;
     }
     .card h2 {
-      margin: 0 0 8px;
-      font-size: 15px;
+      margin: 0 0 4px 0;
+      font-size: 16px;
       color: #032d60;
     }
-    .card p.subtle {
-      margin: 0 0 10px;
+    .card p.subtitle {
+      margin: 0 0 12px 0;
       font-size: 12px;
-      color: #5e6c84;
+      color: #5e6a7f;
     }
     textarea {
       width: 100%;
-      min-height: 80px;
       resize: vertical;
-      border-radius: 8px;
-      border: 1px solid #d0d7e6;
-      padding: 8px;
-      font-size: 13px;
+      min-height: 110px;
       font-family: inherit;
+      font-size: 14px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #d8dde6;
       box-sizing: border-box;
     }
+    .example {
+      font-size: 12px;
+      color: #5e6a7f;
+      margin-top: 6px;
+    }
+    .example strong {
+      color: #032d60;
+    }
     .actions {
+      margin-top: 10px;
       display: flex;
-      justify-content: flex-end;
+      flex-wrap: wrap;
       gap: 8px;
-      margin-top: 8px;
+      align-items: center;
     }
     button {
       border: none;
       border-radius: 999px;
-      padding: 7px 16px;
+      padding: 8px 16px;
       font-size: 13px;
       cursor: pointer;
       background: #0176d3;
-      color: #fff;
+      color: #ffffff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
     }
     button.secondary {
-      background: #e3e8f0;
+      background: #e5f2ff;
       color: #032d60;
     }
     button:disabled {
@@ -96,171 +109,192 @@
       cursor: not-allowed;
     }
     .answer {
-      font-size: 13px;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      color: #051726;
-    }
-    .answer h3 {
       font-size: 14px;
-      margin: 10px 0 4px;
-      color: #032d60;
+      color: #051927;
+      white-space: pre-wrap;
+      line-height: 1.5;
     }
-    .meta {
+    .answer-placeholder {
+      font-size: 13px;
+      color: #8a94a6;
+    }
+    .status {
       margin-top: 10px;
-      padding-top: 8px;
-      border-top: 1px solid #edf0f7;
-      font-size: 11px;
-      color: #6b778c;
-    }
-    .pill-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 6px;
-    }
-    .pill {
-      font-size: 11px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: #e5f2ff;
-      color: #032d60;
-    }
-    .error {
-      color: #b71c1c;
       font-size: 12px;
-      margin-top: 6px;
+      color: #5e6a7f;
+    }
+    .status span.badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      margin-right: 4px;
+    }
+    .ok {
+      background: #e3fcef;
+      color: #046c4e;
+    }
+    .err {
+      background: #fee4e2;
+      color: #b42318;
+    }
+    .backend-error {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #b42318;
     }
   </style>
 </head>
 <body>
-<div class="app">
-  <div class="header">
+<div class="page">
+  <div class="hero">
     <h1>Schindler Total Intelligence – Leadership Console</h1>
-    <p>
-      Ask a single question and combine live signals from ServiceNow, Salesforce and SharePoint
-      into one executive view.
-    </p>
+    <p>Ask one question and combine live signals from ServiceNow, Salesforce, and SharePoint into a single executive view.</p>
   </div>
 
-  <div class="main">
-    <!-- LEFT: Question + Controls -->
+  <div class="grid">
+    <!-- LEFT: QUESTION -->
     <div class="card">
       <h2>Ask the organisation one question</h2>
-      <p class="subtle">
-        Example: <strong>What are the top 3 operational issues I should care about today, and what’s the business impact?</strong>
-      </p>
-      <textarea id="questionInput"></textarea>
-      <div class="actions">
-        <button type="button" class="secondary" id="useExampleBtn">Use example question</button>
-        <button type="button" id="askBtn">Ask</button>
+      <p class="subtitle">Type a leadership-level question in plain language.</p>
+
+      <textarea id="questionInput"
+        placeholder="What are the top 3 operational issues I should care about today, and what’s the business impact?"></textarea>
+
+      <div class="example">
+        Example:<br/>
+        <strong>What are the top 3 operational issues I should care about today, and what’s the business impact?</strong><br/>
+        or<br/>
+        <strong>Give me a leadership view of today’s biggest risks and customer impacts.</strong>
       </div>
-      <div id="errorBox" class="error" style="display:none;"></div>
+
+      <div class="actions">
+        <button type="button" class="secondary" id="exampleBtn">Use example question</button>
+        <button type="button" id="askBtn">Ask</button>
+        <div id="loadingText" style="font-size: 12px; color:#5e6a7f; display:none;">Thinking across systems…</div>
+      </div>
+
+      <div id="backendError" class="backend-error"></div>
     </div>
 
-    <!-- RIGHT: Answer -->
+    <!-- RIGHT: ANSWER -->
     <div class="card">
       <h2>Combined view across systems</h2>
-      <p class="subtle">AI assistant answer, with traceability to each source system.</p>
-      <div id="answerBox" class="answer">
-        <em>Waiting for a question…</em>
+      <p class="subtitle">AI assistant answer with traceability to each source system.</p>
+
+      <div id="answer" class="answer-placeholder">
+        Could not generate an answer yet. Ask a question on the left to see a combined view.
       </div>
-      <div id="metaBox" class="meta" style="display:none;">
-        <div>Signals used:</div>
-        <div class="pill-row" id="pillRow"></div>
-        <div id="timestampRow"></div>
-      </div>
+
+      <div id="status" class="status"></div>
     </div>
   </div>
 </div>
 
 <script>
-  const API_URL = "/api/txi-dashboard"; // same origin as this HTML
+  // IMPORTANT: Backend endpoint (GET with ?question=...)
+  const API_URL = "https://ai-bot-backend-black.vercel.app/api/txi-dashboard";
 
   const questionInput = document.getElementById("questionInput");
   const askBtn = document.getElementById("askBtn");
-  const useExampleBtn = document.getElementById("useExampleBtn");
-  const answerBox = document.getElementById("answerBox");
-  const metaBox = document.getElementById("metaBox");
-  const pillRow = document.getElementById("pillRow");
-  const timestampRow = document.getElementById("timestampRow");
-  const errorBox = document.getElementById("errorBox");
+  const exampleBtn = document.getElementById("exampleBtn");
+  const answerEl = document.getElementById("answer");
+  const statusEl = document.getElementById("status");
+  const backendErrorEl = document.getElementById("backendError");
+  const loadingText = document.getElementById("loadingText");
 
-  const EXAMPLE_QUESTION =
+  const exampleQuestion =
     "What are the top 3 operational issues I should care about today, and what’s the business impact?";
 
-  useExampleBtn.addEventListener("click", () => {
-    questionInput.value = EXAMPLE_QUESTION;
+  exampleBtn.addEventListener("click", () => {
+    questionInput.value = exampleQuestion;
   });
 
-  askBtn.addEventListener("click", async () => {
+  askBtn.addEventListener("click", () => {
     const q = questionInput.value.trim();
     if (!q) return;
+    callBackend(q);
+  });
 
+  questionInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      askBtn.click();
+    }
+  });
+
+  async function callBackend(question) {
     askBtn.disabled = true;
-    useExampleBtn.disabled = true;
-    errorBox.style.display = "none";
-    errorBox.textContent = "";
-    answerBox.innerHTML = "<em>Thinking…</em>";
-    metaBox.style.display = "none";
+    exampleBtn.disabled = true;
+    backendErrorEl.textContent = "";
+    loadingText.style.display = "inline";
+
+    answerEl.className = "answer-placeholder";
+    answerEl.textContent = "Thinking across ServiceNow, Salesforce and SharePoint…";
+
+    statusEl.textContent = "";
 
     try {
-      const resp = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q })
-      });
+      const url = API_URL + "?question=" + encodeURIComponent(question);
+
+      // GET – this matches the backend that says "Use GET"
+      const resp = await fetch(url, { method: "GET" });
 
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error("Backend error: " + text.slice(0, 200));
+        backendErrorEl.textContent = "Backend error: " + text;
+        answerEl.textContent = "Could not generate an answer.";
+        return;
       }
 
       const data = await resp.json();
 
-      const combined = data.combinedAnswer || "No combined answer returned.";
-      answerBox.textContent = combined;
-
-      // Source pills
-      pillRow.innerHTML = "";
-      if (data.sources) {
-        if (data.sources.serviceNow) {
-          const p = document.createElement("div");
-          p.className = "pill";
-          p.textContent = "ServiceNow";
-          pillRow.appendChild(p);
-        }
-        if (data.sources.salesforce) {
-          const p = document.createElement("div");
-          p.className = "pill";
-          p.textContent = "Salesforce";
-          pillRow.appendChild(p);
-        }
-        if (data.sources.sharePoint) {
-          const p = document.createElement("div");
-          p.className = "pill";
-          p.textContent = "SharePoint";
-          pillRow.appendChild(p);
-        }
+      // Main combined answer
+      if (data.combinedAnswer) {
+        answerEl.className = "answer";
+        answerEl.textContent = data.combinedAnswer;
+      } else {
+        answerEl.className = "answer-placeholder";
+        answerEl.textContent = "No combined answer returned from backend.";
       }
 
-      const ts = data.generatedAt || new Date().toISOString();
-      timestampRow.textContent = "Generated at: " + ts;
-      metaBox.style.display = "block";
+      // Source-level status
+      const src = data.sources || {};
+      const parts = [];
 
-    } catch (err) {
-      console.error(err);
-      answerBox.innerHTML = "<em>Could not generate an answer.</em>";
-      errorBox.textContent = err.message;
-      errorBox.style.display = "block";
+      if (src.serviceNow) {
+        if (src.serviceNow.error) {
+          parts.push(`<span class="badge err">ServiceNow: error</span>`);
+        } else {
+          parts.push(`<span class="badge ok">ServiceNow: OK</span>`);
+        }
+      }
+      if (src.salesforce) {
+        parts.push(
+          `<span class="badge ${src.salesforce.error ? "err" : "ok"}">Salesforce: ${
+            src.salesforce.error ? "error" : "OK"
+          }</span>`
+        );
+      }
+      if (src.sharePoint) {
+        parts.push(
+          `<span class="badge ${src.sharePoint.error ? "err" : "ok"}">SharePoint: ${
+            src.sharePoint.error ? "error" : "OK"
+          }</span>`
+        );
+      }
+
+      statusEl.innerHTML = parts.join(" ");
+    } catch (e) {
+      backendErrorEl.textContent = "Frontend error: " + e.message;
+      answerEl.className = "answer-placeholder";
+      answerEl.textContent = "Could not generate an answer.";
     } finally {
       askBtn.disabled = false;
-      useExampleBtn.disabled = false;
+      exampleBtn.disabled = false;
+      loadingText.style.display = "none";
     }
-  });
-
-  // Optional: preload example question
-  questionInput.value = EXAMPLE_QUESTION;
+  }
 </script>
 </body>
 </html>
