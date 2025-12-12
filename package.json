@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "jsforce": "^1.11.1",
+    "jsforce": "^2.0.0",
+    "mammoth": "^1.6.0"
     "node-fetch": "^3.3.2",
-    "mammoth": "^1.6.0",
-    "xlsx": "^0.18.5",
+     "xlsx": "^0.18.5",
     "pdf-parse": "^1.1.1"
   }
 }
