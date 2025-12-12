@@ -1,7 +1,4 @@
 // /api/txi-dashboard.js
-// Vercel Serverless Function (Node)
-// POST { "question": "..." }
-
 import jsforce from "jsforce";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -22,13 +19,13 @@ function money(n) {
   return `$${x.toLocaleString("en-US")}`;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function isGeminiRateLimit(errText = "") {
   const t = String(errText || "").toLowerCase();
   return t.includes("429") || t.includes("resource_exhausted") || t.includes("quota") || t.includes("rate");
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 async function fetchJson(url, options = {}, timeoutMs = 25000) {
@@ -40,11 +37,7 @@ async function fetchJson(url, options = {}, timeoutMs = 25000) {
     const text = await resp.text();
 
     let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = null;
-    }
+    try { json = JSON.parse(text); } catch { json = null; }
 
     return { ok: resp.ok, status: resp.status, text, json };
   } finally {
@@ -52,281 +45,235 @@ async function fetchJson(url, options = {}, timeoutMs = 25000) {
   }
 }
 
-/** -----------------------------
- *  1) ServiceNow fetch
- *  ----------------------------- */
+/** -------------------------------------------------
+ *  1) ServiceNow (standardized shape)
+ *  ------------------------------------------------- */
 async function getServiceNowSummary() {
-  const SN_TXI_URL = process.env.SN_TXI_URL;
-  const SN_USERNAME = process.env.SN_USERNAME;
-  const SN_PASSWORD = process.env.SN_PASSWORD;
+  const url = process.env.SN_TXI_URL;
+  const user = process.env.SN_USERNAME;
+  const pass = process.env.SN_PASSWORD;
 
-  if (!SN_TXI_URL || !SN_USERNAME || !SN_PASSWORD) {
-    return {
-      source: "ServiceNow",
-      error: "ServiceNow env vars not configured (SN_TXI_URL / SN_USERNAME / SN_PASSWORD).",
-    };
+  if (!url || !user || !pass) {
+    return { source: "ServiceNow", ok: false, error: "Missing SN_TXI_URL / SN_USERNAME / SN_PASSWORD", data: null };
   }
 
-  const basic = Buffer.from(`${SN_USERNAME}:${SN_PASSWORD}`).toString("base64");
-
-  const r = await fetchJson(
-    SN_TXI_URL,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Basic ${basic}`,
-        Accept: "application/json",
-      },
-    },
-    20000
-  );
+  const basic = Buffer.from(`${user}:${pass}`).toString("base64");
+  const r = await fetchJson(url, {
+    method: "GET",
+    headers: { Authorization: `Basic ${basic}`, Accept: "application/json" }
+  }, 20000);
 
   if (!r.ok) {
-    return {
-      source: "ServiceNow",
-      error: `ServiceNow HTTP ${r.status}`,
-      raw: r.json ?? r.text,
-    };
+    return { source: "ServiceNow", ok: false, error: `HTTP ${r.status}`, data: r.json ?? { raw: r.text } };
   }
 
-  return r.json ?? { source: "ServiceNow", raw: r.text };
+  // Some SN APIs wrap in {result: {...}}. Normalize.
+  const payload = r.json?.result ? r.json.result : (r.json ?? null);
+
+  return { source: "ServiceNow", ok: true, error: null, data: payload };
 }
 
-/** -----------------------------
- *  2) Salesforce fetch (robust)
- *  ----------------------------- */
+/** -------------------------------------------------
+ *  2) Salesforce (no custom risk fields required)
+ *  ------------------------------------------------- */
 async function getSalesforceSummary() {
-  const SF_USERNAME = process.env.SF_USERNAME;
-  const SF_PASSWORD = process.env.SF_PASSWORD;
-  const SF_TOKEN = process.env.SF_TOKEN;
-  const SF_LOGIN_URL = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
+  const u = process.env.SF_USERNAME;
+  const p = process.env.SF_PASSWORD;
+  const t = process.env.SF_TOKEN;
+  const loginUrl = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
 
-  if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN) {
-    return {
-      source: "Salesforce",
-      error: "Salesforce env vars not configured (SF_USERNAME / SF_PASSWORD / SF_TOKEN).",
-    };
+  if (!u || !p || !t) {
+    return { source: "Salesforce", ok: false, error: "Missing SF_USERNAME / SF_PASSWORD / SF_TOKEN", data: null };
   }
 
-  const conn = new jsforce.Connection({ loginUrl: SF_LOGIN_URL });
-
+  const conn = new jsforce.Connection({ loginUrl });
   try {
-    await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
+    await conn.login(u, p + t);
   } catch (e) {
-    return { source: "Salesforce", error: `Salesforce login failed: ${e?.message || String(e)}` };
+    return { source: "Salesforce", ok: false, error: `Login failed: ${e?.message || String(e)}`, data: null };
   }
 
-  let ebcAccount = null;
+  // Account selection: prefer EBC HQ else any Hot
+  let acct = null;
 
-  // Prefer the demo account you created
   try {
-    const a = await conn.query(
-      `SELECT Id, Name, Industry, Rating
-       FROM Account
-       WHERE Name = 'EBC HQ'
-       LIMIT 1`
-    );
+    const a = await conn.query(`SELECT Id, Name, Industry, Rating FROM Account WHERE Name = 'EBC HQ' LIMIT 1`);
     if (a?.records?.length) {
       const r = a.records[0];
-      ebcAccount = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
+      acct = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 
-  // Fallback: any Hot-rated account
-  if (!ebcAccount) {
+  if (!acct) {
     try {
-      const a2 = await conn.query(
-        `SELECT Id, Name, Industry, Rating
-         FROM Account
-         WHERE Rating = 'Hot'
-         LIMIT 1`
-      );
+      const a2 = await conn.query(`SELECT Id, Name, Industry, Rating FROM Account WHERE Rating = 'Hot' LIMIT 1`);
       if (a2?.records?.length) {
         const r = a2.records[0];
-        ebcAccount = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
+        acct = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
       }
     } catch (e) {
-      return { source: "Salesforce", error: `Account query failed: ${e?.message || String(e)}` };
+      return { source: "Salesforce", ok: false, error: `Account query failed: ${e?.message || String(e)}`, data: null };
     }
   }
 
-  if (!ebcAccount) {
-    return { source: "Salesforce", error: "Could not find a target account (EBC HQ / Hot account)." };
+  if (!acct) {
+    return { source: "Salesforce", ok: false, error: "No target account found (EBC HQ or Rating=Hot).", data: null };
   }
 
-  // Try risk fields first, else fallback by probability/close date
-  const oppQueries = [
-    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-     FROM Opportunity
-     WHERE AccountId = '${ebcAccount.id}'
-       AND At_Risk__c = true
-     ORDER BY Amount DESC
-     LIMIT 10`,
-    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-     FROM Opportunity
-     WHERE AccountId = '${ebcAccount.id}'
-       AND Risk_Flag__c = true
-     ORDER BY Amount DESC
-     LIMIT 10`,
-    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-     FROM Opportunity
-     WHERE AccountId = '${ebcAccount.id}'
-     ORDER BY CloseDate ASC
-     LIMIT 10`,
-  ];
+  // Deterministic "at-risk" criteria (portable across orgs):
+  // - Not closed
+  // - Probability <= 30 OR CloseDate within 45 days
+  const oppQ = `
+    SELECT Id, Name, Amount, StageName, CloseDate, Probability
+    FROM Opportunity
+    WHERE AccountId = '${acct.id}'
+      AND IsClosed = false
+    ORDER BY CloseDate ASC, Amount DESC
+    LIMIT 25
+  `;
 
-  let oppRecords = [];
-  let lastErr = null;
-  let usedFallback = false;
-
-  for (let i = 0; i < oppQueries.length; i++) {
-    try {
-      const o = await conn.query(oppQueries[i]);
-      oppRecords = o?.records || [];
-      usedFallback = i === 2;
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-    }
+  let opp = [];
+  try {
+    const o = await conn.query(oppQ);
+    opp = o?.records || [];
+  } catch (e) {
+    return { source: "Salesforce", ok: false, error: `Opportunity query failed: ${e?.message || String(e)}`, data: { ebcAccount: acct } };
   }
 
-  if (lastErr) {
-    return {
-      source: "Salesforce",
-      ebcAccount,
-      error: `Opportunity query failed: ${lastErr?.message || String(lastErr)}`,
-    };
-  }
+  const now = new Date();
+  const inDays = (dStr) => {
+    const d = new Date(dStr);
+    if (Number.isNaN(d.getTime())) return 99999;
+    return Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  };
 
-  const normalized = oppRecords.map((r) => ({
+  const normalized = opp.map((r) => ({
     id: r.Id,
     name: r.Name,
     amount: safeNumber(r.Amount, 0),
     stage: r.StageName,
     closeDate: r.CloseDate,
     probability: safeNumber(r.Probability, 0),
+    closeInDays: r.CloseDate ? inDays(r.CloseDate) : null
   }));
 
-  const listForSummary = usedFallback ? normalized.filter((o) => o.probability <= 30) : normalized;
-  const totalAmount = listForSummary.reduce((s, o) => s + safeNumber(o.amount), 0);
+  const atRisk = normalized
+    .filter((o) => (o.probability <= 30) || (o.closeInDays != null && o.closeInDays <= 45))
+    .sort((a, b) => (b.amount - a.amount))
+    .slice(0, 10);
+
+  const totalAmount = atRisk.reduce((s, o) => s + safeNumber(o.amount), 0);
 
   return {
     source: "Salesforce",
-    ebcAccount,
-    atRiskSummary: { opportunityCount: listForSummary.length, totalAmount },
-    atRiskOpportunities: listForSummary,
+    ok: true,
+    error: null,
+    data: {
+      ebcAccount: acct,
+      atRiskSummary: { opportunityCount: atRisk.length, totalAmount },
+      atRiskOpportunities: atRisk
+    }
   };
 }
 
-/** -----------------------------
- *  3) SharePoint assistant fetch
- *  ----------------------------- */
+/** -------------------------------------------------
+ *  3) SharePoint assistant (keep as-is but standardized)
+ *  ------------------------------------------------- */
 async function getSharePointSummary(question) {
-  const SP_CHAT_URL = process.env.SP_CHAT_URL;
-  if (!SP_CHAT_URL) {
-    return { source: "SharePoint", error: "SP_CHAT_URL env var not configured." };
+  const url = process.env.SP_CHAT_URL;
+  if (!url) {
+    return { source: "SharePoint", ok: false, error: "Missing SP_CHAT_URL", data: null };
   }
 
-  const r1 = await fetchJson(
-    SP_CHAT_URL,
-    { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question }) },
-    25000
-  );
+  const r1 = await fetchJson(url, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ question })
+  }, 25000);
 
-  if (!r1.ok) {
-    return { source: "SharePoint", error: `SharePoint assistant HTTP ${r1.status}`, raw: r1.json ?? r1.text };
-  }
-  if (!r1.json) {
-    return { source: "SharePoint", error: `SharePoint returned non-JSON`, raw: r1.text };
+  if (!r1.ok || !r1.json) {
+    return { source: "SharePoint", ok: false, error: `HTTP ${r1.status} or non-JSON`, data: r1.json ?? { raw: r1.text } };
   }
 
   const ans = String(r1.json.answer || "");
   const noMatch = ans.toLowerCase().includes("couldn't find") || ans.toLowerCase().includes("no matching");
 
-  // If no match, do a targeted second attempt for your seeded demo files
-  if (noMatch) {
-    const seededPrompt =
-      `Search specifically for these files and extract leadership risks + actions:\n` +
-      `- Annual EBC Review Notes.txt\n` +
-      `- EBC_Account_Health_Risk.docx\n` +
-      `- IT_Operations_Weekly_Report.docx\n\n` +
-      `Return EXACTLY 3 bullets: Risk | Customer impact | Action.\n` +
-      `Original question: ${question}`;
-
-    const r2 = await fetchJson(
-      SP_CHAT_URL,
-      { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question: seededPrompt }) },
-      25000
-    );
-
-    if (r2.ok && r2.json) {
-      return { source: "SharePoint", ...r2.json };
-    }
-
-    return {
-      source: "SharePoint",
-      ...r1.json, // keep the first attempt response
-      note: "No match on broad query; seeded lookup attempt failed.",
-      seededError: r2.json ?? r2.text,
-    };
+  if (!noMatch) {
+    return { source: "SharePoint", ok: true, error: null, data: r1.json };
   }
 
-  return { source: "SharePoint", ...r1.json };
+  const seededPrompt =
+    `Search specifically for these files and extract leadership risks + actions:\n` +
+    `- Annual EBC Review Notes.txt\n` +
+    `- EBC_Account_Health_Risk.docx\n` +
+    `- IT_Operations_Weekly_Report.docx\n\n` +
+    `Return EXACTLY 3 bullets: Risk | Customer impact | Action.\n` +
+    `Original question: ${question}`;
+
+  const r2 = await fetchJson(url, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ question: seededPrompt })
+  }, 25000);
+
+  if (r2.ok && r2.json) {
+    return { source: "SharePoint", ok: true, error: null, data: { ...r2.json, note: "Used seeded-file prompt fallback." } };
+  }
+
+  return {
+    source: "SharePoint",
+    ok: true, // assistant responded, but weak
+    error: null,
+    data: { ...r1.json, note: "Broad query had no match; seeded fallback failed.", seededError: r2.json ?? r2.text }
+  };
 }
 
-/** -----------------------------
- *  4) Local exec formatter (always works)
- *  ----------------------------- */
+/** -------------------------------------------------
+ *  4) Executive answer (uses standardized sources.*.data)
+ *  ------------------------------------------------- */
 function buildExecutiveAnswer({ sources }) {
-  const sf = sources.salesforce || {};
-  const sn = sources.serviceNow || {};
-  const sp = sources.sharePoint || {};
+  const sf = sources.salesforce;
+  const sn = sources.serviceNow;
+  const sp = sources.sharePoint;
 
-  const p1 = sn?.byPriority?.find((x) => String(x.priority) === "1")?.count;
-  const p2 = sn?.byPriority?.find((x) => String(x.priority) === "2")?.count;
+  const snData = sn?.data || {};
+  const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
+  const p1 = byP.find((x) => String(x.priority) === "1")?.count;
+  const p2 = byP.find((x) => String(x.priority) === "2")?.count;
 
-  const salesLine =
-    sf?.atRiskSummary
-      ? `Revenue risk: ${sf.atRiskSummary.opportunityCount} at-risk deal(s) worth ~${money(sf.atRiskSummary.totalAmount)} on ${sf?.ebcAccount?.name || "a key account"}.`
-      : sf?.error
-      ? `Revenue visibility gap: ${String(sf.error).split("\n")[0]}`
-      : `Revenue: insufficient signal.`;
+  const opsLine = sn?.ok
+    ? `IT stability risk: ${safeNumber(snData.totalHighPriority)} high-priority incidents open (P1 ${safeNumber(p1)}, P2 ${safeNumber(p2)}).`
+    : `IT ops visibility gap: ${String(sn?.error || "ServiceNow failed").split("\n")[0]}`;
 
-  const opsLine =
-    sn?.error
-      ? `IT ops visibility gap: ${String(sn.error).split("\n")[0]}`
-      : `IT stability risk: ${safeNumber(sn.totalHighPriority)} high-priority incidents open (P1 ${safeNumber(p1)}, P2 ${safeNumber(p2)}).`;
+  const sfData = sf?.data || {};
+  const salesLine = sf?.ok
+    ? `Revenue risk: ${sfData.atRiskSummary?.opportunityCount ?? 0} at-risk deal(s) worth ~${money(sfData.atRiskSummary?.totalAmount ?? 0)} on ${sfData.ebcAccount?.name || "a key account"}.`
+    : `Revenue visibility gap: ${String(sf?.error || "Salesforce failed").split("\n")[0]}`;
 
-  const spLine =
-    sp?.error
-      ? `Knowledge risk: ${String(sp.error).split("\n")[0]}`
-      : sp?.answer
-      ? `Knowledge signal: ${String(sp.answer).split("\n")[0]}`
-      : `Knowledge: no response.`;
+  const spData = sp?.data || {};
+  const spFirstLine = (spData.answer ? String(spData.answer).split("\n")[0] : "");
+  const spLine = sp?.ok
+    ? (spFirstLine ? `Knowledge signal: ${spFirstLine}` : `Knowledge signal: no explicit extract returned.`)
+    : `Knowledge risk: ${String(sp?.error || "SharePoint failed").split("\n")[0]}`;
 
-  // STRICT “exec style”: short, do-now actions
   return [
     `EXECUTIVE BRIEF — Today’s top risks`,
-    `1) OPERATIONS — ${opsLine} Do now: name owners + 24h stabilization plan (root cause, ETA).`,
-    `2) REVENUE — ${salesLine} Do now: exec sponsor call + save-plan for top 2 deals.`,
-    `3) EXECUTION — ${spLine} Do now: confirm the 3 seeded docs are searchable (name match + permissions).`,
-    `Traceability: Salesforce | ServiceNow | SharePoint`,
+    `1) OPERATIONS — ${opsLine} Do now: assign owners + 24h stabilization plan (root cause, ETA).`,
+    `2) REVENUE — ${salesLine} Do now: exec sponsor call + save-plan for top deals.`,
+    `3) EXECUTION — ${spLine} Do now: confirm seeded docs searchability (exact name + permissions).`,
+    `Traceability: Salesforce | ServiceNow | SharePoint`
   ].join("\n");
 }
 
-/** -----------------------------
- *  5) Gemini (optional) — DOES NOT BLOCK
- *  ----------------------------- */
+/** -------------------------------------------------
+ *  5) Gemini (optional, never blocks)
+ *  ------------------------------------------------- */
 async function callGemini({ question, sources }) {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) return { used: false, error: "GEMINI_API_KEY not configured." };
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return { used: false, error: "GEMINI_API_KEY not configured." };
 
   const model = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 
-  // Force short output so it’s exec-readable, but DO NOT cap tokens too low
   const instruction =
     `You are a CEO-facing executive assistant.\n` +
     `Return EXACTLY 5 lines:\n` +
@@ -335,25 +282,23 @@ async function callGemini({ question, sources }) {
     `Line3: 2) REVENUE — <1 sentence> Do now: <short>\n` +
     `Line4: 3) EXECUTION — <1 sentence> Do now: <short>\n` +
     `Line5: Traceability: Salesforce | ServiceNow | SharePoint\n` +
-    `No extra text. No paragraphs.\n`;
+    `No extra text.\n`;
 
-  const prompt = `${instruction}\nQuestion: ${question}\n\nGround truth JSON:\n${JSON.stringify(sources, null, 2)}`;
+  const prompt =
+    `${instruction}\n` +
+    `Question: ${question}\n\n` +
+    `Ground truth JSON:\n${JSON.stringify(sources, null, 2)}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
-    GEMINI_API_KEY
-  )}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
   async function attemptOnce() {
     const body = {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 350 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 400 }
     };
 
     const r = await fetchJson(url, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }, 25000);
-
-    if (!r.ok) {
-      return { ok: false, status: r.status, raw: r.json ?? r.text, errText: r.text || "" };
-    }
+    if (!r.ok) return { ok: false, status: r.status, raw: r.json ?? r.text, errText: r.text || "" };
 
     const text =
       r.json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
@@ -363,7 +308,6 @@ async function callGemini({ question, sources }) {
     return { ok: true, text };
   }
 
-  // Small retry for 429/503 only
   let last = null;
   for (let i = 1; i <= 2; i++) {
     const out = await attemptOnce();
@@ -379,9 +323,9 @@ async function callGemini({ question, sources }) {
   return { used: false, error: `Gemini failed (HTTP ${last?.status || "?"})`, raw: last?.raw };
 }
 
-/** -----------------------------
+/** -------------------------------------------------
  *  Handler
- *  ----------------------------- */
+ *  ------------------------------------------------- */
 export default async function handler(req, res) {
   allowCors(res);
 
@@ -390,28 +334,23 @@ export default async function handler(req, res) {
 
   let body = req.body;
   if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      body = {};
-    }
+    try { body = JSON.parse(body); } catch { body = {}; }
   }
 
   const question = body?.question;
   if (!question || typeof question !== "string") {
-    return res.status(400).json({ error: 'Missing "question" in request body or not a string.' });
+    return res.status(400).json({ error: 'Missing "question" (string) in request body.' });
   }
 
   try {
     const [serviceNow, salesforce, sharePoint] = await Promise.all([
       getServiceNowSummary(),
       getSalesforceSummary(),
-      getSharePointSummary(question),
+      getSharePointSummary(question)
     ]);
 
     const sources = { serviceNow, salesforce, sharePoint };
 
-    // Gemini is optional: NEVER block output
     const gemini = await callGemini({ question, sources });
 
     const combinedAnswer =
@@ -424,7 +363,7 @@ export default async function handler(req, res) {
       combinedAnswer,
       sources,
       gemini: gemini?.used ? { used: true, model: gemini.model } : { used: false, error: gemini?.error || null },
-      generatedAt: new Date().toISOString(),
+      generatedAt: new Date().toISOString()
     });
   } catch (e) {
     return res.status(500).json({ error: "FUNCTION_INVOCATION_FAILED", detail: e?.message || String(e) });
