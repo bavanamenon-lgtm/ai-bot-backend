@@ -1,14 +1,18 @@
 // api/txi-dashboard.js
 // Schindler Total Intelligence – Leadership Console (TXI POC)
-// FINAL: Canonical Exec Template + SharePoint "no match" treated as NOT OK
+// FINAL HARDENED VERSION:
+// - Canonical Executive Template (5 sections) ALWAYS
+// - Gemini can "polish" ONLY if it preserves all sections (guarded)
+// - SharePoint seeded lookup targets Site/Library/Folder explicitly
+// - SharePoint "no match" correctly sets ok:false (no fake green pills)
 //
 // POST /api/txi-dashboard { "question": "..." }
 //
-// Env vars:
+// Env vars required:
 // SN_TXI_URL, SN_USERNAME, SN_PASSWORD
-// SF_USERNAME, SF_PASSWORD, SF_TOKEN, SF_LOGIN_URL (optional)
+// SF_USERNAME, SF_PASSWORD, SF_TOKEN, SF_LOGIN_URL(optional)
 // SP_CHAT_URL
-// GEMINI_API_KEY (optional), GEMINI_MODEL (optional; default gemini-2.5-flash)
+// Optional: GEMINI_API_KEY, GEMINI_MODEL(optional; default gemini-2.5-flash)
 
 import jsforce from "jsforce";
 
@@ -34,17 +38,6 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function isNoMatchText(s = "") {
-  const t = String(s || "").toLowerCase();
-  return (
-    t.includes("couldn't find") ||
-    t.includes("could not find") ||
-    t.includes("no matching") ||
-    t.includes("i couldn't find any matching") ||
-    t.includes("try using an exact file name")
-  );
-}
-
 async function fetchJson(url, options = {}, timeoutMs = 25000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -57,6 +50,18 @@ async function fetchJson(url, options = {}, timeoutMs = 25000) {
   } finally {
     clearTimeout(id);
   }
+}
+
+function isNoMatchText(s = "") {
+  const t = String(s || "").toLowerCase();
+  return (
+    t.includes("no_match") ||
+    t.includes("couldn't find") ||
+    t.includes("could not find") ||
+    t.includes("no matching") ||
+    t.includes("try using an exact file name") ||
+    t.includes("documents library") && t.includes("couldn't find")
+  );
 }
 
 /* ----------------------------- 1) ServiceNow ----------------------------- */
@@ -104,7 +109,6 @@ async function getSalesforceSummary() {
     return { source: "Salesforce", ok: false, error: `Login failed: ${e?.message || String(e)}`, data: null };
   }
 
-  // Prefer EBC HQ, else any Hot account
   let acct = null;
   try {
     const a = await conn.query(`SELECT Id, Name, Industry, Rating FROM Account WHERE Name='EBC HQ' LIMIT 1`);
@@ -130,9 +134,6 @@ async function getSalesforceSummary() {
     return { source: "Salesforce", ok: false, error: "No target account found (EBC HQ or Rating=Hot).", data: null };
   }
 
-  // Portable at-risk heuristic (no custom fields):
-  // - Not closed
-  // - Probability <= 30 OR CloseDate <= 45 days
   let oppRecords = [];
   try {
     const o = await conn.query(`
@@ -151,7 +152,7 @@ async function getSalesforceSummary() {
   const daysUntil = (dStr) => {
     const d = new Date(dStr);
     if (Number.isNaN(d.getTime())) return 99999;
-    return Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    return Math.ceil((d.getTime() - now.getTime()) / 86400000);
   };
 
   const normalized = oppRecords.map((r) => ({
@@ -164,6 +165,8 @@ async function getSalesforceSummary() {
     closeInDays: r.CloseDate ? daysUntil(r.CloseDate) : null
   }));
 
+  // Portable heuristic (no custom fields):
+  // "at-risk" = low probability OR closing soon
   const atRisk = normalized
     .filter((o) => (o.probability <= 30) || (o.closeInDays != null && o.closeInDays <= 45))
     .sort((a, b) => b.amount - a.amount)
@@ -183,7 +186,7 @@ async function getSalesforceSummary() {
   };
 }
 
-/* ----------------------------- 3) SharePoint ----------------------------- */
+/* ----------------------------- 3) SharePoint (seeded + explicit target) ----------------------------- */
 async function askSharePointAssistant(prompt) {
   const SP_CHAT_URL = process.env.SP_CHAT_URL;
   if (!SP_CHAT_URL) {
@@ -192,7 +195,7 @@ async function askSharePointAssistant(prompt) {
   return fetchJson(
     SP_CHAT_URL,
     { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question: prompt }) },
-    25000
+    30000
   );
 }
 
@@ -202,19 +205,34 @@ async function getSharePointSummary(question) {
     return { source: "SharePoint", ok: false, error: "Missing SP_CHAT_URL", data: null };
   }
 
-  // Seeded-first (because your library needs exact filenames to work reliably)
+  // Your screenshot proves the site is "Vation GTM" and library is "Documents"
+  // Also likely a Teams-connected folder "General".
   const seededPrompt =
-    `Search ONLY these seeded files and extract leadership signals:\n` +
-    `1) Annual EBC Review Notes.txt\n` +
-    `2) EBC_Account_Health_Risk.docx\n` +
-    `3) IT_Operations_Weekly_Report.docx\n\n` +
-    `Return:\n` +
-    `- One line called: "Key risk signals:"\n` +
-    `- Then 3 bullets max.\n` +
-    `- Each bullet format: Risk | Customer impact | Suggested action\n\n` +
-    `If you still cannot find them, say exactly: "NO_MATCH".\n\n` +
-    `User question context: ${question}`;
+`You are connected to Microsoft SharePoint / Teams.
 
+TARGET LOCATION (must follow exactly):
+- Site name: "Vation GTM"
+- Library name: "Documents"
+- Folder(s) to check: root of Documents AND "General"
+
+Step 1: List the filenames you can see in that library/folder (max 15).
+Step 2: Open and extract leadership signals ONLY from these exact files (if present):
+- Annual EBC Review Notes.txt
+- EBC_Account_Health_Risk.docx
+- IT_Operations_Weekly_Report.docx
+- Sales_Risk_Accounts_List.docx
+
+Output format MUST be:
+Key risk signals:
+- Risk | Customer impact | Suggested action
+- Risk | Customer impact | Suggested action
+- Risk | Customer impact | Suggested action
+
+If you cannot list files OR cannot find these exact filenames, output EXACTLY: NO_MATCH
+
+User question context: ${question}`;
+
+  // Attempt 1: seeded + explicit target
   const rSeed = await askSharePointAssistant(seededPrompt);
   if (!rSeed.ok || !rSeed.json) {
     return { source: "SharePoint", ok: false, error: `HTTP ${rSeed.status} or non-JSON`, data: rSeed.json ?? { raw: rSeed.text } };
@@ -222,37 +240,42 @@ async function getSharePointSummary(question) {
 
   const seededAnswer = String(rSeed.json.answer || "");
   if (!seededAnswer || seededAnswer.trim() === "NO_MATCH" || isNoMatchText(seededAnswer)) {
-    // Fallback to the user's question (broad), but treat "no match" as NOT OK
-    const rBroad = await askSharePointAssistant(question);
+    // Attempt 2: broad question but still anchored to the location
+    const anchoredBroadPrompt =
+`Use the same TARGET LOCATION:
+- Site: "Vation GTM"
+- Library: "Documents"
+- Folder(s): root and "General"
+
+Answer the user question using those documents only.
+If nothing relevant is found, output EXACTLY: NO_MATCH
+
+User question: ${question}`;
+
+    const rBroad = await askSharePointAssistant(anchoredBroadPrompt);
 
     if (!rBroad.ok || !rBroad.json) {
       return { source: "SharePoint", ok: false, error: `HTTP ${rBroad.status} or non-JSON`, data: rBroad.json ?? { raw: rBroad.text } };
     }
 
     const broadAnswer = String(rBroad.json.answer || "");
-    if (!broadAnswer || isNoMatchText(broadAnswer)) {
+    if (!broadAnswer || broadAnswer.trim() === "NO_MATCH" || isNoMatchText(broadAnswer)) {
       return {
         source: "SharePoint",
         ok: false,
-        error: "NO_MATCH: SharePoint assistant could not find seeded docs or relevant content (likely filename/permissions/indexing).",
+        error: "NO_MATCH: SharePoint assistant cannot enumerate/find files in 'Vation GTM' → 'Documents' (root/General). Likely wrong drive mapping or permissions for the assistant identity.",
         data: { seededAttempt: rSeed.json, broadAttempt: rBroad.json }
       };
     }
 
-    return { source: "SharePoint", ok: true, error: null, data: { ...rBroad.json, note: "Used broad fallback." } };
+    return { source: "SharePoint", ok: true, error: null, data: { ...rBroad.json, note: "Used anchored broad fallback." } };
   }
 
-  // Seeded worked
-  return { source: "SharePoint", ok: true, error: null, data: { ...rSeed.json, note: "Used seeded-first lookup." } };
+  return { source: "SharePoint", ok: true, error: null, data: { ...rSeed.json, note: "Used seeded explicit lookup." } };
 }
 
-/* ----------------------------- 4) Canonical Executive Answer ----------------------------- */
-
+/* ----------------------------- 4) Canonical Executive Template ----------------------------- */
 function computeRiskLevel({ sn, sf, sp }) {
-  // Forced clarity heuristic (simple + explainable)
-  // - If ServiceNow P1 is high => High risk
-  // - If at-risk revenue > 250k => High or Medium (depending on ops)
-  // - If SharePoint missing => increases uncertainty (but not automatically "High")
   const snData = sn?.data || {};
   const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
   const p1 = safeNumber(byP.find((x) => String(x.priority) === "1")?.count, 0);
@@ -265,69 +288,64 @@ function computeRiskLevel({ sn, sf, sp }) {
   if (p1 >= 50 || totalHP >= 75) return "High — customer experience and SLA commitments are at risk within the next 24 hours.";
   if (rev >= 250000 && (p1 >= 20 || totalHP >= 50)) return "High — combined ops disruption + revenue exposure needs executive coordination.";
   if (rev >= 250000) return "Medium — revenue exposure is material; protect top deals and reduce churn risk.";
-  if (!sp?.ok) return "Medium — decision risk: knowledge signals are unavailable; validate impacts with ops owners.";
-  return "Low/Medium — monitor closely; no immediate escalation signals beyond baseline.";
+  if (!sp?.ok) return "Medium — leadership context from SharePoint is missing; validate impacts with ops owners.";
+  return "Low/Medium — monitor closely; no immediate escalation beyond baseline.";
 }
 
-function buildCanonicalExecutiveAnswer({ question, sources }) {
-  const sn = sources.serviceNow;
-  const sf = sources.salesforce;
-  const sp = sources.sharePoint;
+function buildCanonicalExecutiveAnswer({ sources }) {
+  const sn = sources.serviceNow || {};
+  const sf = sources.salesforce || {};
+  const sp = sources.sharePoint || {};
 
-  const snData = sn?.data || {};
+  const snData = sn.data || {};
   const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
   const p1 = safeNumber(byP.find((x) => String(x.priority) === "1")?.count, 0);
   const p2 = safeNumber(byP.find((x) => String(x.priority) === "2")?.count, 0);
   const totalHP = safeNumber(snData.totalHighPriority, 0);
 
-  const sfData = sf?.data || {};
+  const sfData = sf.data || {};
   const acctName = sfData.ebcAccount?.name || "a key account";
   const acctIndustry = sfData.ebcAccount?.industry || "—";
   const revCount = safeNumber(sfData.atRiskSummary?.opportunityCount, 0);
   const revAmount = safeNumber(sfData.atRiskSummary?.totalAmount, 0);
 
-  const spData = sp?.data || {};
-  const spAnswerLine = sp?.ok && spData?.answer ? String(spData.answer).trim() : "";
-  const spSignal = sp?.ok
-    ? (spAnswerLine ? spAnswerLine.split("\n")[0] : "No additional knowledge signals returned.")
-    : "Knowledge signal unavailable — SharePoint lookup failed (likely filename/permissions/indexing).";
+  const spData = sp.data || {};
+  const spAnswerLine = sp.ok && spData?.answer ? String(spData.answer).trim() : "";
+  const spSignal = sp.ok
+    ? (spAnswerLine ? spAnswerLine.split("\n")[0] : "No additional SharePoint signal returned.")
+    : "SharePoint leadership context unavailable (assistant could not locate documents in Vation GTM → Documents).";
 
-  // 1) What’s happening (no jargon)
-  const whatsHappening = sn?.ok
-    ? `There are ${totalHP} high-priority incidents open today (P1 ${p1}, P2 ${p2}), indicating elevated service disruption risk.`
-    : `Operational data is partially unavailable because ServiceNow summary failed: ${sn?.error || "unknown error"}.`;
+  const whatsHappening = sn.ok
+    ? `A spike of high-priority incidents is visible today: ${totalHP} open (P1 ${p1}, P2 ${p2}).`
+    : `ServiceNow signal is unavailable right now: ${sn.error || "unknown error"}.`;
 
-  // 2) Why this matters (business impact)
   const whyMatters = (() => {
     const parts = [];
-    if (sn?.ok) parts.push("If unresolved, outages may extend customer downtime and breach SLAs.");
-    if (sf?.ok && revCount > 0) parts.push(`We also have ${revCount} at-risk deal(s) worth ~${money(revAmount)} that could slip without proactive coverage.`);
-    if (!sp?.ok) parts.push("Additionally, leadership context from SharePoint is missing, increasing decision uncertainty.");
+    if (sn.ok) parts.push("If unresolved, this can extend customer downtime and risk SLA breaches.");
+    if (sf.ok && revCount > 0) parts.push(`We also have ${revCount} at-risk deal(s) worth ~${money(revAmount)} requiring proactive coverage.`);
+    if (!sp.ok) parts.push("SharePoint context is missing, increasing decision uncertainty for customer/region impact.");
     return parts.join(" ");
   })();
 
-  // 3) Who is impacted (be specific, but don’t hallucinate)
   const whoImpacted = (() => {
     const parts = [];
-    if (sf?.ok) parts.push(`Commercial focus: ${acctName} (${acctIndustry}).`);
-    if (sn?.ok) parts.push("Operational focus: customers tied to P1/P2 incidents and active SLA commitments.");
-    if (sp?.ok && spSignal) parts.push(`Knowledge signals: ${spSignal}`);
+    if (sf.ok) parts.push(`Commercial focus: ${acctName} (${acctIndustry}).`);
+    if (sn.ok) parts.push("Operational focus: customers tied to P1/P2 incidents and active SLA commitments.");
+    if (sp.ok && spSignal) parts.push(`Document signal: ${spSignal}`);
     return parts.join(" ");
   })();
 
-  // 4) Risk level (forced clarity)
   const risk = computeRiskLevel({ sn, sf, sp });
 
-  // 5) Leadership attention required (decision-oriented)
   const leadershipAction = (() => {
     const actions = [];
-    actions.push("Confirm today’s P1 owners + ETA, and demand a 24-hour stabilization plan (root cause + containment).");
-    if (sf?.ok && revCount > 0) actions.push(`Protect revenue: executive sponsor outreach for ${acctName} and top at-risk deals today.`);
-    if (!sp?.ok) actions.push("Fix knowledge visibility: validate SharePoint permissions + exact file names for seeded docs and re-test search.");
+    actions.push("Confirm P1 owners + ETA now, and demand a 24-hour stabilization plan (containment + root cause).");
+    if (sf.ok && revCount > 0) actions.push(`Protect revenue: executive sponsor outreach for ${acctName} and top at-risk deals today.`);
+    if (!sp.ok) actions.push("Fix SharePoint: validate assistant permissions + correct drive mapping to Vation GTM → Documents (root/General), then re-test seeded filenames.");
     return actions.join(" ");
   })();
 
-  const trace = `Traceability: Salesforce(${sf?.ok ? "OK" : "error"}) | ServiceNow(${sn?.ok ? "OK" : "error"}) | SharePoint(${sp?.ok ? "OK" : "error"})`;
+  const trace = `Traceability: Salesforce(${sf.ok ? "OK" : "error"}) | ServiceNow(${sn.ok ? "OK" : "error"}) | SharePoint(${sp.ok ? "OK" : "error"})`;
 
   return [
     "EXECUTIVE BRIEF — Today’s Primary Risk & Customer Impact",
@@ -351,37 +369,52 @@ function buildCanonicalExecutiveAnswer({ question, sources }) {
   ].join("\n");
 }
 
-/* ----------------------------- 5) Gemini (Optional) ----------------------------- */
+/* ----------------------------- 5) Gemini (optional polish with hard guard) ----------------------------- */
+function looksLikeCanonicalTemplate(text) {
+  const t = String(text || "");
+  // Must contain the 5 sections + Traceability (guard against tiny outputs)
+  const must = [
+    "EXECUTIVE BRIEF",
+    "1. What’s happening",
+    "2. Why this matters",
+    "3. Who is impacted",
+    "4. Risk level",
+    "5. Leadership attention required",
+    "Traceability:"
+  ];
+  return must.every((m) => t.includes(m)) && t.length >= 350; // hard minimum to prevent 80-char junk
+}
 
 function isGeminiRateLimit(errText = "") {
   const t = String(errText || "").toLowerCase();
   return t.includes("429") || t.includes("resource_exhausted") || t.includes("quota") || t.includes("rate");
 }
 
-async function callGeminiPolish({ question, sources }) {
+async function callGeminiPolish(canonicalBrief) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return { used: false, error: "GEMINI_API_KEY not configured." };
 
   const model = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 
-  // IMPORTANT: Gemini should "polish" but never shorten/omit sections.
   const instruction =
-    `Rewrite the following executive brief in crisp leadership language.\n` +
-    `Rules:\n` +
-    `- Keep ALL 5 numbered sections and headings exactly.\n` +
-    `- Do NOT remove facts.\n` +
-    `- Do NOT add invented customers/regions.\n` +
-    `- Keep it within 10-14 lines total.\n`;
+`Rewrite the executive brief in crisp leadership language.
 
-  const base = buildCanonicalExecutiveAnswer({ question, sources });
-  const prompt = `${instruction}\n\nBASE BRIEF:\n${base}`;
+ABSOLUTE RULES:
+- Keep ALL headings and all 5 sections exactly as-is.
+- Keep the "Traceability:" line.
+- Do NOT remove facts.
+- Do NOT add invented customers/regions.
+- Do NOT shorten into a one-liner.
+- Keep it readable and executive-grade.`;
+
+  const prompt = `${instruction}\n\nBRIEF:\n${canonicalBrief}`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
   async function attemptOnce() {
     const body = {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 600 }
+      generationConfig: { temperature: 0.2, maxOutputTokens: 700 }
     };
 
     const r = await fetchJson(url, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }, 25000);
@@ -411,7 +444,6 @@ async function callGeminiPolish({ question, sources }) {
 }
 
 /* ----------------------------- Handler ----------------------------- */
-
 export default async function handler(req, res) {
   allowCors(res);
 
@@ -437,21 +469,27 @@ export default async function handler(req, res) {
 
     const sources = { serviceNow, salesforce, sharePoint };
 
-    // Always build canonical deterministic brief
-    let combinedAnswer = buildCanonicalExecutiveAnswer({ question, sources });
+    // 1) Always generate canonical deterministic brief
+    const canonical = buildCanonicalExecutiveAnswer({ sources });
 
-    // Gemini optional polish (never required)
-    const gemini = await callGeminiPolish({ question, sources });
+    // 2) Gemini polish is optional; accept ONLY if it preserves template + length
+    let combinedAnswer = canonical;
+    const gemini = await callGeminiPolish(canonical);
 
-    if (gemini?.used && gemini?.text) {
-      combinedAnswer = gemini.text; // safe because prompt forces keeping all 5 sections
+    if (gemini?.used && gemini?.text && looksLikeCanonicalTemplate(gemini.text)) {
+      combinedAnswer = gemini.text;
+    } else {
+      // If Gemini produced junk/short output, ignore it (never override canonical)
+      // Keep gemini metadata for debug transparency
     }
 
     return res.status(200).json({
       question,
       combinedAnswer,
       sources,
-      gemini: gemini?.used ? { used: true, model: gemini.model } : { used: false, error: gemini?.error || null },
+      gemini: (gemini?.used && gemini?.text && looksLikeCanonicalTemplate(gemini.text))
+        ? { used: true, model: gemini.model }
+        : { used: false, error: gemini?.error || "Gemini output rejected by template guard." },
       generatedAt: new Date().toISOString()
     });
   } catch (e) {
