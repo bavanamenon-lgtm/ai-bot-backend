@@ -1,18 +1,15 @@
 // api/txi-dashboard.js
-// Schindler Total Intelligence – Leadership Console (TXI POC)
-// FINAL HARDENED VERSION:
-// - Canonical Executive Template (5 sections) ALWAYS
-// - Gemini can "polish" ONLY if it preserves all sections (guarded)
-// - SharePoint seeded lookup targets Site/Library/Folder explicitly
-// - SharePoint "no match" correctly sets ok:false (no fake green pills)
-//
+// TXI POC Master Endpoint
 // POST /api/txi-dashboard { "question": "..." }
 //
-// Env vars required:
+// Key: Executive Response Contract enforced.
+// SharePoint: direct Graph read via /api/sharepoint-signals (same Vercel deployment)
+//
+// Env:
 // SN_TXI_URL, SN_USERNAME, SN_PASSWORD
 // SF_USERNAME, SF_PASSWORD, SF_TOKEN, SF_LOGIN_URL(optional)
-// SP_CHAT_URL
-// Optional: GEMINI_API_KEY, GEMINI_MODEL(optional; default gemini-2.5-flash)
+// MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET (for SharePoint Graph)
+// Optional: GEMINI_API_KEY, GEMINI_MODEL
 
 import jsforce from "jsforce";
 
@@ -34,10 +31,6 @@ function money(n) {
   return `$${x.toLocaleString("en-US")}`;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 async function fetchJson(url, options = {}, timeoutMs = 25000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -52,45 +45,29 @@ async function fetchJson(url, options = {}, timeoutMs = 25000) {
   }
 }
 
-function isNoMatchText(s = "") {
-  const t = String(s || "").toLowerCase();
-  return (
-    t.includes("no_match") ||
-    t.includes("couldn't find") ||
-    t.includes("could not find") ||
-    t.includes("no matching") ||
-    t.includes("try using an exact file name") ||
-    t.includes("documents library") && t.includes("couldn't find")
-  );
-}
-
-/* ----------------------------- 1) ServiceNow ----------------------------- */
+/* ----------------------------- ServiceNow ----------------------------- */
 async function getServiceNowSummary() {
   const url = process.env.SN_TXI_URL;
   const user = process.env.SN_USERNAME;
   const pass = process.env.SN_PASSWORD;
 
   if (!url || !user || !pass) {
-    return { source: "ServiceNow", ok: false, error: "Missing SN_TXI_URL / SN_USERNAME / SN_PASSWORD", data: null };
+    return { source: "ServiceNow", ok: false, error: "Missing SN env vars", data: null };
   }
 
   const basic = Buffer.from(`${user}:${pass}`).toString("base64");
+  const r = await fetchJson(url, {
+    method: "GET",
+    headers: { Authorization: `Basic ${basic}`, Accept: "application/json" }
+  }, 20000);
 
-  const r = await fetchJson(
-    url,
-    { method: "GET", headers: { Authorization: `Basic ${basic}`, Accept: "application/json" } },
-    20000
-  );
-
-  if (!r.ok) {
-    return { source: "ServiceNow", ok: false, error: `HTTP ${r.status}`, data: r.json ?? { raw: r.text } };
-  }
+  if (!r.ok) return { source: "ServiceNow", ok: false, error: `HTTP ${r.status}`, data: r.json ?? { raw: r.text } };
 
   const payload = r.json?.result ? r.json.result : (r.json ?? null);
   return { source: "ServiceNow", ok: true, error: null, data: payload };
 }
 
-/* ----------------------------- 2) Salesforce ----------------------------- */
+/* ----------------------------- Salesforce ----------------------------- */
 async function getSalesforceSummary() {
   const SF_USERNAME = process.env.SF_USERNAME;
   const SF_PASSWORD = process.env.SF_PASSWORD;
@@ -98,7 +75,7 @@ async function getSalesforceSummary() {
   const SF_LOGIN_URL = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
 
   if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN) {
-    return { source: "Salesforce", ok: false, error: "Missing SF_USERNAME / SF_PASSWORD / SF_TOKEN", data: null };
+    return { source: "Salesforce", ok: false, error: "Missing SF env vars", data: null };
   }
 
   const conn = new jsforce.Connection({ loginUrl: SF_LOGIN_URL });
@@ -130,9 +107,7 @@ async function getSalesforceSummary() {
     }
   }
 
-  if (!acct) {
-    return { source: "Salesforce", ok: false, error: "No target account found (EBC HQ or Rating=Hot).", data: null };
-  }
+  if (!acct) return { source: "Salesforce", ok: false, error: "No target account found", data: null };
 
   let oppRecords = [];
   try {
@@ -165,8 +140,6 @@ async function getSalesforceSummary() {
     closeInDays: r.CloseDate ? daysUntil(r.CloseDate) : null
   }));
 
-  // Portable heuristic (no custom fields):
-  // "at-risk" = low probability OR closing soon
   const atRisk = normalized
     .filter((o) => (o.probability <= 30) || (o.closeInDays != null && o.closeInDays <= 45))
     .sort((a, b) => b.amount - a.amount)
@@ -186,96 +159,35 @@ async function getSalesforceSummary() {
   };
 }
 
-/* ----------------------------- 3) SharePoint (seeded + explicit target) ----------------------------- */
-async function askSharePointAssistant(prompt) {
-  const SP_CHAT_URL = process.env.SP_CHAT_URL;
-  if (!SP_CHAT_URL) {
-    return { ok: false, status: 0, json: null, text: "Missing SP_CHAT_URL" };
-  }
-  return fetchJson(
-    SP_CHAT_URL,
-    { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question: prompt }) },
-    30000
-  );
+/* ----------------------------- SharePoint (Graph via internal endpoint) ----------------------------- */
+async function getSharePointSignals(question, req) {
+  // Call same deployment endpoint
+  // Works on Vercel because it routes internally over HTTPS using host header
+  const proto = (req.headers["x-forwarded-proto"] || "https");
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const base = `${proto}://${host}`;
+
+  const r = await fetchJson(`${base}/api/sharepoint-signals`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ question })
+  }, 30000);
+
+  // sharepoint-signals returns 200 always with ok true/false in payload
+  const payload = r.json || { ok: false, error: "SharePoint signals returned non-JSON" };
+
+  return {
+    source: "SharePoint",
+    ok: !!payload.ok,
+    error: payload.ok ? null : (payload.error || "NO_MATCH"),
+    data: payload
+  };
 }
 
-async function getSharePointSummary(question) {
-  const SP_CHAT_URL = process.env.SP_CHAT_URL;
-  if (!SP_CHAT_URL) {
-    return { source: "SharePoint", ok: false, error: "Missing SP_CHAT_URL", data: null };
-  }
+/* ----------------------------- Executive Response Contract ----------------------------- */
 
-  // Your screenshot proves the site is "Vation GTM" and library is "Documents"
-  // Also likely a Teams-connected folder "General".
-  const seededPrompt =
-`You are connected to Microsoft SharePoint / Teams.
-
-TARGET LOCATION (must follow exactly):
-- Site name: "Vation GTM"
-- Library name: "Documents"
-- Folder(s) to check: root of Documents AND "General"
-
-Step 1: List the filenames you can see in that library/folder (max 15).
-Step 2: Open and extract leadership signals ONLY from these exact files (if present):
-- Annual EBC Review Notes.txt
-- EBC_Account_Health_Risk.docx
-- IT_Operations_Weekly_Report.docx
-- Sales_Risk_Accounts_List.docx
-
-Output format MUST be:
-Key risk signals:
-- Risk | Customer impact | Suggested action
-- Risk | Customer impact | Suggested action
-- Risk | Customer impact | Suggested action
-
-If you cannot list files OR cannot find these exact filenames, output EXACTLY: NO_MATCH
-
-User question context: ${question}`;
-
-  // Attempt 1: seeded + explicit target
-  const rSeed = await askSharePointAssistant(seededPrompt);
-  if (!rSeed.ok || !rSeed.json) {
-    return { source: "SharePoint", ok: false, error: `HTTP ${rSeed.status} or non-JSON`, data: rSeed.json ?? { raw: rSeed.text } };
-  }
-
-  const seededAnswer = String(rSeed.json.answer || "");
-  if (!seededAnswer || seededAnswer.trim() === "NO_MATCH" || isNoMatchText(seededAnswer)) {
-    // Attempt 2: broad question but still anchored to the location
-    const anchoredBroadPrompt =
-`Use the same TARGET LOCATION:
-- Site: "Vation GTM"
-- Library: "Documents"
-- Folder(s): root and "General"
-
-Answer the user question using those documents only.
-If nothing relevant is found, output EXACTLY: NO_MATCH
-
-User question: ${question}`;
-
-    const rBroad = await askSharePointAssistant(anchoredBroadPrompt);
-
-    if (!rBroad.ok || !rBroad.json) {
-      return { source: "SharePoint", ok: false, error: `HTTP ${rBroad.status} or non-JSON`, data: rBroad.json ?? { raw: rBroad.text } };
-    }
-
-    const broadAnswer = String(rBroad.json.answer || "");
-    if (!broadAnswer || broadAnswer.trim() === "NO_MATCH" || isNoMatchText(broadAnswer)) {
-      return {
-        source: "SharePoint",
-        ok: false,
-        error: "NO_MATCH: SharePoint assistant cannot enumerate/find files in 'Vation GTM' → 'Documents' (root/General). Likely wrong drive mapping or permissions for the assistant identity.",
-        data: { seededAttempt: rSeed.json, broadAttempt: rBroad.json }
-      };
-    }
-
-    return { source: "SharePoint", ok: true, error: null, data: { ...rBroad.json, note: "Used anchored broad fallback." } };
-  }
-
-  return { source: "SharePoint", ok: true, error: null, data: { ...rSeed.json, note: "Used seeded explicit lookup." } };
-}
-
-/* ----------------------------- 4) Canonical Executive Template ----------------------------- */
-function computeRiskLevel({ sn, sf, sp }) {
+function computeRisk(sn, sf, sp) {
+  // Forced clarity: High/Medium/Low only
   const snData = sn?.data || {};
   const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
   const p1 = safeNumber(byP.find((x) => String(x.priority) === "1")?.count, 0);
@@ -284,163 +196,184 @@ function computeRiskLevel({ sn, sf, sp }) {
   const sfData = sf?.data || {};
   const rev = safeNumber(sfData.atRiskSummary?.totalAmount, 0);
 
-  if (!sn?.ok) return "High — operational visibility is degraded right now.";
-  if (p1 >= 50 || totalHP >= 75) return "High — customer experience and SLA commitments are at risk within the next 24 hours.";
-  if (rev >= 250000 && (p1 >= 20 || totalHP >= 50)) return "High — combined ops disruption + revenue exposure needs executive coordination.";
-  if (rev >= 250000) return "Medium — revenue exposure is material; protect top deals and reduce churn risk.";
-  if (!sp?.ok) return "Medium — leadership context from SharePoint is missing; validate impacts with ops owners.";
-  return "Low/Medium — monitor closely; no immediate escalation beyond baseline.";
+  if (!sn?.ok) return "High";
+  if (p1 >= 50 || totalHP >= 75) return "High";
+  if (rev >= 250000) return "Medium";
+  if (!sp?.ok) return "Medium";
+  return "Low";
 }
 
-function buildCanonicalExecutiveAnswer({ sources }) {
-  const sn = sources.serviceNow || {};
-  const sf = sources.salesforce || {};
-  const sp = sources.sharePoint || {};
+function noHedge(text) {
+  // kill hedge words if they appear accidentally
+  return String(text || "")
+    .replace(/\b(might|could|possibly|maybe|likely|potentially)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
 
-  const snData = sn.data || {};
+function buildExecBriefContract({ question, sources }) {
+  const sn = sources.serviceNow;
+  const sf = sources.salesforce;
+  const sp = sources.sharePoint;
+
+  const snData = sn?.data || {};
   const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
   const p1 = safeNumber(byP.find((x) => String(x.priority) === "1")?.count, 0);
   const p2 = safeNumber(byP.find((x) => String(x.priority) === "2")?.count, 0);
   const totalHP = safeNumber(snData.totalHighPriority, 0);
 
-  const sfData = sf.data || {};
-  const acctName = sfData.ebcAccount?.name || "a key account";
-  const acctIndustry = sfData.ebcAccount?.industry || "—";
-  const revCount = safeNumber(sfData.atRiskSummary?.opportunityCount, 0);
-  const revAmount = safeNumber(sfData.atRiskSummary?.totalAmount, 0);
+  const sfData = sf?.data || {};
+  const acct = sfData.ebcAccount?.name || "a key account";
+  const industry = sfData.ebcAccount?.industry || "—";
+  const dealCount = safeNumber(sfData.atRiskSummary?.opportunityCount, 0);
+  const dealValue = safeNumber(sfData.atRiskSummary?.totalAmount, 0);
 
-  const spData = sp.data || {};
-  const spAnswerLine = sp.ok && spData?.answer ? String(spData.answer).trim() : "";
-  const spSignal = sp.ok
-    ? (spAnswerLine ? spAnswerLine.split("\n")[0] : "No additional SharePoint signal returned.")
-    : "SharePoint leadership context unavailable (assistant could not locate documents in Vation GTM → Documents).";
+  const spData = sp?.data || {};
+  const hasDocs = sp?.ok && (spData?.filesFound?.length > 0);
+  const knowledgeLine = hasDocs
+    ? "Leadership notes are available to confirm impacted areas and priority customers."
+    : "Leadership notes are not visible, which blocks precise impact confirmation.";
 
-  const whatsHappening = sn.ok
-    ? `A spike of high-priority incidents is visible today: ${totalHP} open (P1 ${p1}, P2 ${p2}).`
-    : `ServiceNow signal is unavailable right now: ${sn.error || "unknown error"}.`;
+  const riskLevel = computeRisk(sn, sf, sp);
 
-  const whyMatters = (() => {
-    const parts = [];
-    if (sn.ok) parts.push("If unresolved, this can extend customer downtime and risk SLA breaches.");
-    if (sf.ok && revCount > 0) parts.push(`We also have ${revCount} at-risk deal(s) worth ~${money(revAmount)} requiring proactive coverage.`);
-    if (!sp.ok) parts.push("SharePoint context is missing, increasing decision uncertainty for customer/region impact.");
-    return parts.join(" ");
-  })();
+  const s1 = sn?.ok
+    ? `High-severity service disruption is above baseline today (${totalHP} high-priority issues; P1 ${p1}, P2 ${p2}).`
+    : `Operational disruption is elevated, but live visibility is degraded right now.`;
 
-  const whoImpacted = (() => {
-    const parts = [];
-    if (sf.ok) parts.push(`Commercial focus: ${acctName} (${acctIndustry}).`);
-    if (sn.ok) parts.push("Operational focus: customers tied to P1/P2 incidents and active SLA commitments.");
-    if (sp.ok && spSignal) parts.push(`Document signal: ${spSignal}`);
-    return parts.join(" ");
-  })();
+  const s2 = (sf?.ok && dealCount > 0)
+    ? `This threatens customer experience today and puts ${dealCount} active deal(s) worth ~${money(dealValue)} at risk if not contained.`
+    : `This threatens customer experience today and requires immediate containment to protect service commitments.`;
 
-  const risk = computeRiskLevel({ sn, sf, sp });
+  const s3 = (sf?.ok)
+    ? `Primary commercial exposure sits with ${acct} (${industry}); operational impact concentrates where the highest-severity issues are open.`
+    : `Impact concentrates where the highest-severity issues are open and where commercial commitments are time-sensitive.`;
 
-  const leadershipAction = (() => {
-    const actions = [];
-    actions.push("Confirm P1 owners + ETA now, and demand a 24-hour stabilization plan (containment + root cause).");
-    if (sf.ok && revCount > 0) actions.push(`Protect revenue: executive sponsor outreach for ${acctName} and top at-risk deals today.`);
-    if (!sp.ok) actions.push("Fix SharePoint: validate assistant permissions + correct drive mapping to Vation GTM → Documents (root/General), then re-test seeded filenames.");
-    return actions.join(" ");
-  })();
+  const s4 = `Risk: ${riskLevel}.`;
 
-  const trace = `Traceability: Salesforce(${sf.ok ? "OK" : "error"}) | ServiceNow(${sn.ok ? "OK" : "error"}) | SharePoint(${sp.ok ? "OK" : "error"})`;
+  const s5 = (riskLevel === "High")
+    ? `Leadership action: assign a single incident commander now, lock a 24-hour stabilization plan, and trigger proactive customer communication for priority accounts.`
+    : `Leadership action: confirm owners and timelines today, protect priority deals with executive outreach, and restore leadership note visibility for faster decisions.`;
 
-  return [
+  const out = [
     "EXECUTIVE BRIEF — Today’s Primary Risk & Customer Impact",
     "",
-    "1. What’s happening (1 sentence, no jargon)",
-    whatsHappening,
+    "1. What’s happening",
+    noHedge(s1),
     "",
-    "2. Why this matters (business impact)",
-    whyMatters,
+    "2. Why this matters",
+    noHedge(s2),
     "",
-    "3. Who is impacted (be specific, not generic)",
-    whoImpacted,
+    "3. Who is impacted",
+    noHedge(`${s3} ${knowledgeLine}`),
     "",
-    "4. Risk level (explicit, forced clarity)",
-    `Risk: ${risk}`,
+    "4. Risk level",
+    noHedge(s4),
     "",
-    "5. Leadership attention required (decision-oriented)",
-    leadershipAction,
-    "",
-    trace
+    "5. Leadership attention required",
+    noHedge(s5)
   ].join("\n");
+
+  return out;
 }
 
-/* ----------------------------- 5) Gemini (optional polish with hard guard) ----------------------------- */
-function looksLikeCanonicalTemplate(text) {
+// Reject Gemini if it violates contract
+function violatesContract(text) {
   const t = String(text || "");
-  // Must contain the 5 sections + Traceability (guard against tiny outputs)
+
+  // Must have max 5 sections + these headings (exact)
   const must = [
-    "EXECUTIVE BRIEF",
+    "EXECUTIVE BRIEF — Today’s Primary Risk & Customer Impact",
     "1. What’s happening",
     "2. Why this matters",
     "3. Who is impacted",
     "4. Risk level",
-    "5. Leadership attention required",
-    "Traceability:"
+    "5. Leadership attention required"
   ];
-  return must.every((m) => t.includes(m)) && t.length >= 350; // hard minimum to prevent 80-char junk
+  if (!must.every(m => t.includes(m))) return true;
+
+  // No system names / technical words
+  const forbidden = /(servicenow|salesforce|sharepoint|api|http|token|drive|site id|soql|endpoint|graph)/i;
+  if (forbidden.test(t)) return true;
+
+  // No hedge words
+  const hedge = /\b(might|could|possibly|maybe|likely|potentially)\b/i;
+  if (hedge.test(t)) return true;
+
+  // Risk level must be explicit High/Medium/Low
+  if (!/Risk:\s*(High|Medium|Low)\b/.test(t)) return true;
+
+  // Each section should be 1–2 sentences. (Approx check: limit per section lines)
+  // We enforce by limiting total length and expecting compact structure.
+  if (t.length > 1100) return true;
+  if (t.length < 350) return true;
+
+  return false;
 }
 
-function isGeminiRateLimit(errText = "") {
-  const t = String(errText || "").toLowerCase();
-  return t.includes("429") || t.includes("resource_exhausted") || t.includes("quota") || t.includes("rate");
-}
-
-async function callGeminiPolish(canonicalBrief) {
+async function callGeminiExec(question, contextSignals) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return { used: false, error: "GEMINI_API_KEY not configured." };
 
   const model = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 
-  const instruction =
-`Rewrite the executive brief in crisp leadership language.
+  // EXECUTIVE RESPONSE CONTRACT embedded (your contract)
+  const systemContract =
+`You are an enterprise executive AI assistant acting as Chief of Staff to C-level leadership.
+Optimize for decision clarity, not completeness.
 
-ABSOLUTE RULES:
-- Keep ALL headings and all 5 sections exactly as-is.
-- Keep the "Traceability:" line.
-- Do NOT remove facts.
-- Do NOT add invented customers/regions.
-- Do NOT shorten into a one-liner.
-- Keep it readable and executive-grade.`;
+Strict rules:
+- Use plain business language (no system names, no technical details).
+- Maximum 5 sections.
+- Each section: 1–2 short sentences.
+- No hedging words (might, could, possibly).
+- Explicitly state risk level (High / Medium / Low).
+- End with leadership actions, not analysis.
+- Do NOT explain reasoning.
+- Do NOT mention data sources unless asked.
 
-  const prompt = `${instruction}\n\nBRIEF:\n${canonicalBrief}`;
+You must follow this structure exactly:
+
+EXECUTIVE BRIEF — Today’s Primary Risk & Customer Impact
+1. What’s happening
+2. Why this matters
+3. Who is impacted
+4. Risk level
+5. Leadership attention required`;
+
+  const userPrompt =
+`Create an EXECUTIVE BRIEF for C-level leadership answering the question below.
+
+Question:
+"${question}"
+
+Context signals (synthesize, do not repeat verbatim):
+${contextSignals}
+
+Constraints:
+- Follow the Executive Brief structure
+- Maximum 5 sections
+- Each section 1–2 short sentences
+- Use plain business language only
+- Explicitly state risk level
+- End with leadership actions
+- Do not include system names or technical steps`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
-  async function attemptOnce() {
-    const body = {
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 700 }
-    };
+  const body = {
+    contents: [{ role: "user", parts: [{ text: `${systemContract}\n\n${userPrompt}` }] }],
+    generationConfig: { temperature: 0.2, maxOutputTokens: 650 }
+  };
 
-    const r = await fetchJson(url, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }, 25000);
-    if (!r.ok) return { ok: false, status: r.status, raw: r.json ?? r.text, errText: r.text || "" };
+  const r = await fetchJson(url, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }, 25000);
+  if (!r.ok) return { used: false, error: `Gemini HTTP ${r.status}`, raw: r.json ?? r.text };
 
-    const text =
-      r.json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
-      r.json?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "";
+  const text =
+    r.json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
+    r.json?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "";
 
-    return { ok: true, text };
-  }
-
-  let last = null;
-  for (let i = 1; i <= 2; i++) {
-    const out = await attemptOnce();
-    if (out.ok && out.text?.trim()) return { used: true, model, text: out.text.trim() };
-    last = out;
-    if (out.status === 429 || out.status === 503 || isGeminiRateLimit(out.errText)) {
-      await sleep(900 * i);
-      continue;
-    }
-    break;
-  }
-
-  return { used: false, error: `Gemini failed (HTTP ${last?.status || "?"})`, raw: last?.raw };
+  return { used: true, model, text: String(text || "").trim() };
 }
 
 /* ----------------------------- Handler ----------------------------- */
@@ -464,32 +397,52 @@ export default async function handler(req, res) {
     const [serviceNow, salesforce, sharePoint] = await Promise.all([
       getServiceNowSummary(),
       getSalesforceSummary(),
-      getSharePointSummary(question)
+      getSharePointSignals(question, req)
     ]);
 
     const sources = { serviceNow, salesforce, sharePoint };
 
-    // 1) Always generate canonical deterministic brief
-    const canonical = buildCanonicalExecutiveAnswer({ sources });
+    // Deterministic contract answer always exists
+    const deterministic = buildExecBriefContract({ question, sources });
 
-    // 2) Gemini polish is optional; accept ONLY if it preserves template + length
-    let combinedAnswer = canonical;
-    const gemini = await callGeminiPolish(canonical);
+    // Build context signals for Gemini (still plain language, no system names)
+    const snData = serviceNow?.data || {};
+    const byP = Array.isArray(snData.byPriority) ? snData.byPriority : [];
+    const p1 = safeNumber(byP.find((x) => String(x.priority) === "1")?.count, 0);
+    const p2 = safeNumber(byP.find((x) => String(x.priority) === "2")?.count, 0);
+    const totalHP = safeNumber(snData.totalHighPriority, 0);
 
-    if (gemini?.used && gemini?.text && looksLikeCanonicalTemplate(gemini.text)) {
-      combinedAnswer = gemini.text;
-    } else {
-      // If Gemini produced junk/short output, ignore it (never override canonical)
-      // Keep gemini metadata for debug transparency
+    const sfData = salesforce?.data || {};
+    const acct = sfData.ebcAccount?.name || "a key account";
+    const industry = sfData.ebcAccount?.industry || "—";
+    const dealCount = safeNumber(sfData.atRiskSummary?.opportunityCount, 0);
+    const dealValue = safeNumber(sfData.atRiskSummary?.totalAmount, 0);
+
+    const knowledgeGap = sharePoint?.ok ? "Leadership notes available." : "Knowledge visibility gaps affecting impact assessment.";
+
+    const contextSignals =
+`- High-priority issues: P1=${p1}, P2=${p2}, total=${totalHP} (above normal baseline)
+- Revenue exposure: ${dealCount} active deal(s), ~${money(dealValue)}
+- Key account: ${acct} (${industry})
+- ${knowledgeGap}`;
+
+    // Gemini optional: accept only if it respects contract
+    let combinedAnswer = deterministic;
+    let geminiMeta = { used: false, error: "Gemini not used." };
+
+    const g = await callGeminiExec(question, contextSignals);
+    if (g.used && g.text && !violatesContract(g.text)) {
+      combinedAnswer = g.text;
+      geminiMeta = { used: true, model: g.model };
+    } else if (g.used) {
+      geminiMeta = { used: false, error: "Gemini output rejected (contract violation)." };
     }
 
     return res.status(200).json({
       question,
       combinedAnswer,
       sources,
-      gemini: (gemini?.used && gemini?.text && looksLikeCanonicalTemplate(gemini.text))
-        ? { used: true, model: gemini.model }
-        : { used: false, error: gemini?.error || "Gemini output rejected by template guard." },
+      gemini: geminiMeta,
       generatedAt: new Date().toISOString()
     });
   } catch (e) {
