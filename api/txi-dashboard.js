@@ -22,20 +22,16 @@ function money(n) {
   return `$${x.toLocaleString("en-US")}`;
 }
 
-function isGeminiRateLimit(errText = "") {
-  return (
-    errText.includes("429") ||
-    errText.toLowerCase().includes("resource_exhausted") ||
-    errText.toLowerCase().includes("quota") ||
-    errText.toLowerCase().includes("rate")
-  );
+function isRateLimitLike(status, text = "") {
+  const t = String(text || "").toLowerCase();
+  return status === 429 || status === 503 || t.includes("quota") || t.includes("resource_exhausted") || t.includes("rate");
 }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchJson(url, options = {}, timeoutMs = 20000) {
+async function fetchJson(url, options = {}, timeoutMs = 25000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -43,7 +39,6 @@ async function fetchJson(url, options = {}, timeoutMs = 20000) {
     const resp = await fetch(url, { ...options, signal: controller.signal });
     const text = await resp.text();
 
-    // Try JSON parse; if it fails, return raw text
     let json = null;
     try {
       json = JSON.parse(text);
@@ -51,12 +46,7 @@ async function fetchJson(url, options = {}, timeoutMs = 20000) {
       json = null;
     }
 
-    return {
-      ok: resp.ok,
-      status: resp.status,
-      text,
-      json,
-    };
+    return { ok: resp.ok, status: resp.status, text, json };
   } finally {
     clearTimeout(id);
   }
@@ -66,7 +56,7 @@ async function fetchJson(url, options = {}, timeoutMs = 20000) {
  *  1) ServiceNow fetch
  *  ----------------------------- */
 async function getServiceNowSummary() {
-  const SN_TXI_URL = process.env.SN_TXI_URL; // e.g. https://ven06080.service-now.com/api/dtp/schindler_txi/incident_summary
+  const SN_TXI_URL = process.env.SN_TXI_URL; // https://ven06080.service-now.com/api/dtp/schindler_txi/incident_summary
   const SN_USERNAME = process.env.SN_USERNAME;
   const SN_PASSWORD = process.env.SN_PASSWORD;
 
@@ -88,14 +78,9 @@ async function getServiceNowSummary() {
   );
 
   if (!r.ok) {
-    return {
-      source: "ServiceNow",
-      error: `ServiceNow HTTP ${r.status}`,
-      raw: r.json ?? r.text,
-    };
+    return { source: "ServiceNow", error: `ServiceNow HTTP ${r.status}`, raw: r.json ?? r.text };
   }
 
-  // Your endpoint already returns a good JSON structure.
   return r.json ?? { source: "ServiceNow", raw: r.text };
 }
 
@@ -120,38 +105,22 @@ async function getSalesforceSummary() {
     return { source: "Salesforce", error: `Salesforce login failed: ${e?.message || String(e)}` };
   }
 
-  // Strategy:
-  // A) Try to locate an EBC-ish account without relying on custom fields.
-  //    Use the account you created: "EBC HQ".
-  // B) Pull at-risk opps using common checkbox API names (At_Risk__c, Risk_Flag__c).
-  //    If those fields don't exist, fallback to stage/probability based shortlist.
-
+  // Always target EBC HQ first (because you created it)
   let ebcAccount = null;
 
   try {
-    const a = await conn.query(
-      `SELECT Id, Name, Industry, Rating
-       FROM Account
-       WHERE Name = 'EBC HQ'
-       LIMIT 1`
-    );
+    const a = await conn.query(`SELECT Id, Name, Industry, Rating FROM Account WHERE Name = 'EBC HQ' LIMIT 1`);
     if (a?.records?.length) {
       const r = a.records[0];
       ebcAccount = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
     }
   } catch (e) {
-    // Keep going; we’ll fallback later.
+    // ignore; fallback below
   }
 
-  // If not found, pick a "Hot" account as fallback.
   if (!ebcAccount) {
     try {
-      const a2 = await conn.query(
-        `SELECT Id, Name, Industry, Rating
-         FROM Account
-         WHERE Rating = 'Hot'
-         LIMIT 1`
-      );
+      const a2 = await conn.query(`SELECT Id, Name, Industry, Rating FROM Account WHERE Rating = 'Hot' LIMIT 1`);
       if (a2?.records?.length) {
         const r = a2.records[0];
         ebcAccount = { id: r.Id, name: r.Name, industry: r.Industry || null, rating: r.Rating || null };
@@ -161,61 +130,45 @@ async function getSalesforceSummary() {
     }
   }
 
-  if (!ebcAccount) {
-    return { source: "Salesforce", error: "Could not find a target account (EBC HQ / Hot account)." };
-  }
+  if (!ebcAccount) return { source: "Salesforce", error: "Could not find target account (EBC HQ / Hot account)." };
 
-  // Try at-risk opps using custom fields (your UI shows Risk Flag + At Risk)
-  let oppQueryTried = [];
+  // Try your UI custom flags first; if they don’t exist, don’t blow up the whole response.
   const oppQueries = [
-    // most likely custom fields
+    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
+     FROM Opportunity
+     WHERE AccountId = '${ebcAccount.id}' AND At_Risk__c = true
+     ORDER BY Amount DESC LIMIT 10`,
+    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
+     FROM Opportunity
+     WHERE AccountId = '${ebcAccount.id}' AND Risk_Flag__c = true
+     ORDER BY Amount DESC LIMIT 10`,
     `SELECT Id, Name, Amount, StageName, CloseDate, Probability
      FROM Opportunity
      WHERE AccountId = '${ebcAccount.id}'
-       AND At_Risk__c = true
-     ORDER BY Amount DESC
-     LIMIT 10`,
-    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-     FROM Opportunity
-     WHERE AccountId = '${ebcAccount.id}'
-       AND Risk_Flag__c = true
-     ORDER BY Amount DESC
-     LIMIT 10`,
-    // fallback: treat low probability + near close date as risk
-    `SELECT Id, Name, Amount, StageName, CloseDate, Probability
-     FROM Opportunity
-     WHERE AccountId = '${ebcAccount.id}'
-     ORDER BY CloseDate ASC
-     LIMIT 10`,
+     ORDER BY CloseDate ASC LIMIT 10`,
   ];
 
-  let oppRecords = null;
-  let oppError = null;
+  let oppRecords = [];
+  let usedQueryIndex = -1;
+  let lastErr = null;
 
-  for (const q of oppQueries) {
-    oppQueryTried.push(q);
+  for (let i = 0; i < oppQueries.length; i++) {
     try {
-      const o = await conn.query(q);
+      const o = await conn.query(oppQueries[i]);
       oppRecords = o?.records || [];
-      oppError = null;
+      usedQueryIndex = i;
+      lastErr = null;
       break;
     } catch (e) {
-      oppError = e;
-      continue;
+      lastErr = e;
     }
   }
 
-  if (!oppRecords) {
-    return {
-      source: "Salesforce",
-      ebcAccount,
-      error: `Opportunity query failed: ${oppError?.message || String(oppError)}`,
-      debug: { oppQueryTried },
-    };
+  if (usedQueryIndex === -1) {
+    return { source: "Salesforce", ebcAccount, error: `Opportunity query failed: ${lastErr?.message || String(lastErr)}` };
   }
 
-  // Normalize
-  const atRiskOpportunities = oppRecords.map((r) => ({
+  const normalized = oppRecords.map((r) => ({
     id: r.Id,
     name: r.Name,
     amount: safeNumber(r.Amount, 0),
@@ -224,232 +177,155 @@ async function getSalesforceSummary() {
     probability: safeNumber(r.Probability, 0),
   }));
 
-  // If we used fallback query, we should *compute* "at risk" as probability <= 30
-  const computedAtRisk = atRiskOpportunities.filter((o) => o.probability <= 30);
+  // If we had to use fallback query, compute risk = probability <= 30 (your sample uses 10 and 30)
+  const atRiskList =
+    usedQueryIndex === 0 || usedQueryIndex === 1
+      ? normalized
+      : normalized.filter((o) => safeNumber(o.probability, 0) <= 30);
 
-  const useList = atRiskOpportunities.some((o) => o.name) ? atRiskOpportunities : [];
-  const listForSummary =
-    // if At_Risk__c/Risk_Flag__c worked, take those
-    (oppQueryTried[0] && oppQueryTried[0].includes("At_Risk__c") && useList.length ? useList : null) ||
-    (oppQueryTried[1] && oppQueryTried[1].includes("Risk_Flag__c") && useList.length ? useList : null) ||
-    // else computed risk list
-    (computedAtRisk.length ? computedAtRisk : useList);
-
-  const totalAmount = listForSummary.reduce((s, o) => s + safeNumber(o.amount), 0);
+  const totalAmount = atRiskList.reduce((s, o) => s + safeNumber(o.amount), 0);
 
   return {
     source: "Salesforce",
     ebcAccount,
-    atRiskSummary: { opportunityCount: listForSummary.length, totalAmount },
-    atRiskOpportunities: listForSummary,
+    atRiskSummary: { opportunityCount: atRiskList.length, totalAmount },
+    atRiskOpportunities: atRiskList,
   };
 }
 
 /** -----------------------------
- *  3) SharePoint assistant fetch
+ *  3) SharePoint assistant fetch (FORCE your 3 seeded files)
  *  ----------------------------- */
 async function getSharePointSummary(question) {
-  const SP_CHAT_URL = process.env.SP_CHAT_URL; // your working SharePoint assistant endpoint
-  if (!SP_CHAT_URL) {
-    return { source: "SharePoint", error: "SP_CHAT_URL env var not configured." };
-  }
+  const SP_CHAT_URL = process.env.SP_CHAT_URL;
+  if (!SP_CHAT_URL) return { source: "SharePoint", error: "SP_CHAT_URL env var not configured." };
 
-  // First attempt: ask the question as-is
-  const r1 = await fetchJson(
+  // FORCE targeted retrieval every time (because leadership queries are too broad)
+  const forced =
+    `Leadership query. You MUST first search these exact files (by name) and summarise them if found:\n` +
+    `- Annual EBC Review Notes.txt\n` +
+    `- EBC_Account_Health_Risk.docx\n` +
+    `- IT_Operations_Weekly_Report.docx\n\n` +
+    `If you find them, return in this format:\n` +
+    `1) Risk\n- Evidence (quote or short proof)\n- Customer impact\n- Action for leadership\n\n` +
+    `If not found, explain EXACTLY which of the three files were not located.\n\n` +
+    `User question: ${question}`;
+
+  const r = await fetchJson(
     SP_CHAT_URL,
-    {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ question }),
-    },
-    25000
+    { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question: forced }) },
+    30000
   );
 
-  if (r1.ok && r1.json) {
-    // if it says "no matching files", do a second attempt with seeded filenames/keywords
-    const ans = String(r1.json.answer || "");
-    const noMatch = ans.toLowerCase().includes("couldn't find") || ans.toLowerCase().includes("no matching");
-
-    if (!noMatch) return { source: "SharePoint", ...r1.json };
-
-    // Second attempt: force it to look for your seeded files
-    const seededPrompt =
-      `Search specifically for these files and summarise what’s relevant for leadership risks:\n` +
-      `1) Annual EBC Review Notes.txt\n` +
-      `2) EBC_Account_Health_Risk.docx\n` +
-      `3) IT_Operations_Weekly_Report.docx\n\n` +
-      `If found, return 3 bullets: Risk, Customer impact, Action.\n` +
-      `Original question: ${question}`;
-
-    const r2 = await fetchJson(
-      SP_CHAT_URL,
-      {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: JSON.stringify({ question: seededPrompt }),
-      },
-      25000
-    );
-
-    if (r2.ok && r2.json) return { source: "SharePoint", ...r2.json };
-
-    return {
-      source: "SharePoint",
-      error: `SharePoint assistant returned HTTP ${r2.status}`,
-      raw: r2.json ?? r2.text,
-    };
+  if (!r.ok) {
+    return { source: "SharePoint", error: `SharePoint assistant HTTP ${r.status}`, raw: r.json ?? r.text };
   }
 
-  return {
-    source: "SharePoint",
-    error: `SharePoint assistant returned HTTP ${r1.status}`,
-    raw: r1.json ?? r1.text,
-  };
+  // normalize
+  return { source: "SharePoint", ...(r.json || { answer: r.text }) };
 }
 
 /** -----------------------------
- *  4) Gemini (2.5/3) with fallback
+ *  4) Gemini (2.5) — NEVER block output on Gemini errors
  *  ----------------------------- */
 async function callGemini({ question, sources }) {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) {
-    return { used: false, error: "GEMINI_API_KEY not configured." };
-  }
+  if (!GEMINI_API_KEY) return { used: false, error: "GEMINI_API_KEY not configured." };
 
-  // You can override via env; else we try best → fallback
-  const preferred = (process.env.GEMINI_MODEL || "").trim();
-  const modelChain = [
-    preferred,
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
-  ].filter(Boolean);
+  // Lock to the model you want
+  const model = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 
-  const systemInstruction =
-    `You are an executive TXI assistant. Output MUST be short, structured, and action-oriented.\n` +
-    `Format EXACTLY like:\n` +
-    `TITLE (1 line)\n` +
-    `1) Risk headline — So what (1 sentence) — Do now (1 sentence)\n` +
-    `2) ...\n` +
-    `3) ...\n` +
-    `Then a final line: "Traceability: Salesforce | ServiceNow | SharePoint"\n` +
+  const instruction =
+    `Write an EXECUTIVE answer. Keep it scannable.\n` +
+    `Output EXACTLY:\n` +
+    `EXECUTIVE BRIEF (1 line)\n` +
+    `- What’s happening (max 2 bullets)\n` +
+    `- Why it matters (max 2 bullets)\n` +
+    `TOP 3 RISKS (numbered)\n` +
+    `For each: Risk — Evidence — Action (one line each)\n` +
+    `Close with: Traceability: Salesforce | ServiceNow | SharePoint\n` +
     `No long paragraphs. No filler.\n`;
 
   const prompt =
-    `${systemInstruction}\n` +
-    `Question: ${question}\n\n` +
-    `Data (ground truth JSON). Do not invent fields not present:\n` +
+    `${instruction}\n\nQuestion: ${question}\n\nGround truth JSON (do not hallucinate):\n` +
     JSON.stringify(sources, null, 2);
 
-  // v1beta generateContent endpoint
-  async function tryModel(model) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
-      GEMINI_API_KEY
-    )}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
+    GEMINI_API_KEY
+  )}`;
 
-    const body = {
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 450,
-      },
-    };
-
+  // 2 quick attempts only
+  for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await fetchJson(
       url,
-      { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) },
-      25000
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+        }),
+      },
+      30000
     );
 
-    if (!r.ok) {
-      const errText = r.text || "";
-      return { ok: false, status: r.status, errText, raw: r.json ?? r.text };
+    if (r.ok && r.json) {
+      const text =
+        r.json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
+        r.json?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        "";
+      if (text.trim()) return { used: true, model, text };
     }
 
-    const text =
-      r.json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
-      r.json?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "";
-
-    if (!text.trim()) {
-      return { ok: false, status: 500, errText: "Empty Gemini response", raw: r.json };
+    if (isRateLimitLike(r.status, r.text)) {
+      await sleep(900 * attempt);
+      continue;
     }
-
-    return { ok: true, text };
+    break;
   }
 
-  // retry logic (short) + model fallback
-  let lastErr = null;
-
-  for (const model of modelChain) {
-    // 2 attempts per model
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const out = await tryModel(model);
-
-      if (out.ok) {
-        return { used: true, model, text: out.text };
-      }
-
-      lastErr = out;
-      // If rate-limited, wait a bit then either retry or move to next model
-      if (isGeminiRateLimit(out.errText) || out.status === 429 || out.status === 503) {
-        await sleep(900 * attempt);
-        continue;
-      } else {
-        // non-rate error → move to next model
-        break;
-      }
-    }
-  }
-
-  return { used: false, error: `Gemini failed. Last: HTTP ${lastErr?.status}`, raw: lastErr?.raw };
+  return { used: false, error: "Gemini failed (rate/availability). Falling back to local formatting." };
 }
 
 /** -----------------------------
- *  5) Local executive formatter (no Gemini needed)
+ *  5) Local fallback (still executive)
  *  ----------------------------- */
-function buildExecutiveAnswer({ question, sources }) {
-  const sf = sources.salesforce;
-  const sn = sources.serviceNow;
-  const sp = sources.sharePoint;
+function buildExecutiveAnswer({ sources }) {
+  const sf = sources.salesforce || {};
+  const sn = sources.serviceNow || {};
+  const sp = sources.sharePoint || {};
 
-  // Revenue risk
-  const sfRisk =
-    sf?.atRiskSummary
-      ? `Revenue risk on ${sf?.ebcAccount?.name || "strategic account"}: ${sf.atRiskSummary.opportunityCount} deal(s), total ${money(sf.atRiskSummary.totalAmount)}.`
-      : sf?.error
-      ? `Sales risk visibility gap: ${String(sf.error).slice(0, 140)}.`
-      : `Sales risk: insufficient data.`;
+  const p1 = sn?.byPriority?.find((x) => String(x.priority) === "1")?.count ?? 0;
+  const p2 = sn?.byPriority?.find((x) => String(x.priority) === "2")?.count ?? 0;
 
-  // IT risk
-  const p1 = sn?.byPriority?.find((x) => String(x.priority) === "1")?.count;
-  const p2 = sn?.byPriority?.find((x) => String(x.priority) === "2")?.count;
-  const high = sn?.totalHighPriority;
+  const sfLine = sf?.atRiskSummary
+    ? `Revenue risk: ${money(sf.atRiskSummary.totalAmount)} across ${sf.atRiskSummary.opportunityCount} at-risk deal(s) (${sf?.ebcAccount?.name || "key account"}).`
+    : sf?.error
+    ? `Revenue visibility gap: ${String(sf.error).slice(0, 140)}`
+    : `Revenue: insufficient signal.`;
 
-  const snRisk =
-    sn?.error
-      ? `IT visibility gap: ${String(sn.error).slice(0, 140)}.`
-      : `IT stability risk: ${safeNumber(high)} high-priority incidents open (P1 ${safeNumber(p1)}, P2 ${safeNumber(p2)}).`;
+  const snLine = sn?.error
+    ? `IT visibility gap: ${String(sn.error).slice(0, 140)}`
+    : `IT stability: ${safeNumber(sn.totalHighPriority)} high-priority incidents (P1 ${safeNumber(p1)}, P2 ${safeNumber(p2)}).`;
 
-  // Knowledge risk
-  const spAns = sp?.answer ? String(sp.answer) : "";
-  const spRisk =
-    sp?.error
-      ? `Knowledge visibility gap: ${String(sp.error).slice(0, 140)}.`
-      : spAns.toLowerCase().includes("couldn't find")
-      ? `Knowledge signal weak: no matching docs found in scope for this phrasing (try exact file names).`
-      : `Knowledge signal available: insights pulled from SharePoint.`;
+  const spLine = sp?.error
+    ? `Knowledge visibility gap: ${String(sp.error).slice(0, 140)}`
+    : sp?.answer
+    ? `Knowledge signal: ${String(sp.answer).slice(0, 220)}`
+    : `Knowledge: no signal.`;
 
-  // Do-now actions (tight)
-  const lines = [
-    `TXI Leadership Snapshot — today`,
-    `1) Revenue — ${sfRisk} Do now: exec sponsor + “save plan” for the top 2 deals today.`,
-    `2) Operations — ${snRisk} Do now: 24-hour stabilization plan (owners, root cause, ETA).`,
-    `3) Execution knowledge — ${spRisk} Do now: run targeted doc query: “EBC_Account_Health_Risk” + “IT_Operations_Weekly_Report”.`,
+  return [
+    `EXECUTIVE BRIEF`,
+    `- What’s happening: ${snLine}`,
+    `- What’s happening: ${sfLine}`,
+    `- Why it matters: Leadership decisions are only as good as these signals; any blind spot is a risk itself.`,
+    ``,
+    `TOP 3 RISKS`,
+    `1) Operations — Evidence: P1=${safeNumber(p1)} / P2=${safeNumber(p2)} — Action: 24h stabilization plan with owners + ETAs.`,
+    `2) Revenue — Evidence: ${sf?.atRiskSummary ? money(sf.atRiskSummary.totalAmount) : "N/A"} — Action: exec sponsor + save-plan on EBC HQ deals.`,
+    `3) Execution knowledge — Evidence: ${sp?.error ? "SharePoint failure" : "Docs signal weak/partial"} — Action: validate the 3 seeded files are searchable + returned.`,
     `Traceability: Salesforce | ServiceNow | SharePoint`,
-  ];
-
-  return lines.join("\n");
+  ].join("\n");
 }
 
 /** -----------------------------
@@ -458,30 +334,18 @@ function buildExecutiveAnswer({ question, sources }) {
 export default async function handler(req, res) {
   allowCors(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
 
   let body = req.body;
   if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      body = {};
-    }
+    try { body = JSON.parse(body); } catch { body = {}; }
   }
 
   const question = body?.question;
-  if (!question || typeof question !== "string") {
-    return res.status(400).json({ error: 'Missing "question" in request body or not a string.' });
-  }
+  if (!question || typeof question !== "string") return res.status(400).json({ error: 'Missing "question" in request body.' });
 
   try {
-    // Fetch all sources in parallel
     const [serviceNow, salesforce, sharePoint] = await Promise.all([
       getServiceNowSummary(),
       getSalesforceSummary(),
@@ -490,25 +354,17 @@ export default async function handler(req, res) {
 
     const sources = { serviceNow, salesforce, sharePoint };
 
-    // Try Gemini (optional), but NEVER block output on it
     const gemini = await callGemini({ question, sources });
-
-    const combinedAnswer =
-      gemini?.used && gemini?.text
-        ? gemini.text
-        : buildExecutiveAnswer({ question, sources });
+    const combinedAnswer = gemini.used ? gemini.text : buildExecutiveAnswer({ sources });
 
     return res.status(200).json({
       question,
       combinedAnswer,
       sources,
-      gemini: gemini?.used ? { used: true, model: gemini.model } : { used: false, error: gemini?.error || null },
+      gemini: gemini.used ? { used: true, model: gemini.model } : { used: false, error: gemini.error },
       generatedAt: new Date().toISOString(),
     });
   } catch (e) {
-    return res.status(500).json({
-      error: "FUNCTION_INVOCATION_FAILED",
-      detail: e?.message || String(e),
-    });
+    return res.status(500).json({ error: "FUNCTION_INVOCATION_FAILED", detail: e?.message || String(e) });
   }
 }
