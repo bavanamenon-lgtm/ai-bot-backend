@@ -1,380 +1,360 @@
 // api/txi-dashboard.js
-//
-// Schindler TXI – Leadership Console backend
-// - Fetches summary from ServiceNow TXI endpoint
-// - Fetches EBC / at-risk data from Salesforce
-// - Fetches doc insight from SharePoint AI assistant
-// - Builds a clean leadership summary WITHOUT calling Gemini
-//
-// Assumes Node ESM + Vercel API route
+// Schindler TXI Dashboard: ServiceNow + Salesforce + SharePoint -> (Optional) Gemini polish
+// Always returns a result (never fail whole response because one system fails).
 
 import fetch from "node-fetch";
 import jsforce from "jsforce";
 
 const {
+  // ServiceNow
+  SN_TXI_URL,
+  SN_USERNAME,
+  SN_PASSWORD,
+
   // Salesforce
   SF_USERNAME,
   SF_PASSWORD,
   SF_TOKEN,
   SF_LOGIN_URL,
 
-  // ServiceNow (TXI incident summary endpoint)
-  SN_TXI_URL,
-  SN_USERNAME,
-  SN_PASSWORD,
-
-  // SharePoint assistant (your existing /api/chat-sp endpoint URL)
+  // SharePoint (calls our own chat-sp endpoint)
   SP_CHAT_URL,
+
+  // Gemini
+  GEMINI_API_KEY,
+  GEMINI_MODEL,
 } = process.env;
 
-// ---------- Helpers ----------
-
-function basicAuthHeader(user, pass) {
-  const token = Buffer.from(`${user}:${pass}`).toString("base64");
-  return `Basic ${token}`;
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-// ---------- ServiceNow: TXI incident summary ----------
+function safeNum(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : 0;
+}
 
-async function fetchServiceNowSummary() {
+function shortMoneyUSD(amount) {
+  const a = safeNum(amount);
+  return a.toLocaleString("en-US");
+}
+
+function buildSharePointQuery(question = "") {
+  const q = (question || "").toLowerCase();
+
+  // map leadership phrases -> file keywords
+  if (q.includes("deal") || q.includes("revenue") || q.includes("pipeline") || q.includes("budget") || q.includes("opportun")) {
+    return `Search SharePoint for "Deals Pipeline" OR "Execution Plan" OR "Action Items" and summarise the most relevant file.`;
+  }
+  if (q.includes("incident") || q.includes("outage") || q.includes("service") || q.includes("sla")) {
+    return `Search SharePoint for "incident" OR "postmortem" OR "SLA" OR "major incident" and summarise the most relevant file.`;
+  }
+  return `Search SharePoint for "Execution Plan" OR "Action Items" and summarise the most relevant file.`;
+}
+
+async function fetchServiceNow() {
   if (!SN_TXI_URL || !SN_USERNAME || !SN_PASSWORD) {
-    return {
-      source: "ServiceNow",
-      error:
-        "ServiceNow env vars not configured (SN_TXI_URL / SN_USERNAME / SN_PASSWORD).",
-    };
+    return { source: "ServiceNow", error: "ServiceNow env vars not configured (SN_TXI_URL / SN_USERNAME / SN_PASSWORD)." };
   }
 
-  try {
-    const resp = await fetch(SN_TXI_URL, {
-      method: "GET",
-      headers: {
-        Authorization: basicAuthHeader(SN_USERNAME, SN_PASSWORD),
-        "Content-Type": "application/json",
-      },
-    });
+  const auth = Buffer.from(`${SN_USERNAME}:${SN_PASSWORD}`).toString("base64");
 
-    const raw = await resp.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
-      return {
-        source: "ServiceNow",
-        error: "ServiceNow TXI endpoint returned non-JSON response.",
-      };
-    }
-
-    if (!resp.ok) {
-      return {
-        source: "ServiceNow",
-        error:
-          data.error ||
-          `ServiceNow API error (status ${resp.status || "unknown"})`,
-      };
-    }
-
-    // Expecting shape:
-    // {
-    //   source: "ServiceNow",
-    //   generatedAt: "...",
-    //   totalHighPriority: 78,
-    //   byPriority: [{priority:"1",count:72},...],
-    //   ebcIncidents: [...]
-    // }
-    return data;
-  } catch (err) {
-    return {
-      source: "ServiceNow",
-      error: `ServiceNow fetch error: ${String(err)}`,
-    };
-  }
-}
-
-// ---------- Salesforce: EBC + at-risk opps ----------
-
-async function fetchSalesforceSummary() {
-  if (!SF_USERNAME || !SF_PASSWORD || ! SF_TOKEN || !SF_LOGIN_URL) {
-    return {
-      source: "Salesforce",
-      error:
-        "Salesforce env vars not configured (SF_USERNAME / SF_PASSWORD / SF_TOKEN / SF_LOGIN_URL).",
-    };
-  }
-
-  const conn = new jsforce.Connection({
-    loginUrl: SF_LOGIN_URL,
+  const resp = await fetch(SN_TXI_URL, {
+    method: "GET",
+    headers: {
+      "Authorization": `Basic ${auth}`,
+      "Accept": "application/json",
+    },
   });
 
-  try {
-    await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
+  const text = await resp.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) {}
 
-    // 1) Find the EBC HQ account (you already created this in sample data)
-    const accResult = await conn.query(
-      "SELECT Id, Name, Industry, Rating " +
-        "FROM Account " +
-        "WHERE Name = 'EBC HQ' " +
-        "LIMIT 1"
-    );
-
-    const ebcAccount = accResult.records && accResult.records[0];
-    if (!ebcAccount) {
-      return {
-        source: "Salesforce",
-        ebcAccount: null,
-        atRiskSummary: null,
-        atRiskOpportunities: [],
-        note: "No EBC HQ account found in Salesforce sample data.",
-      };
-    }
-
-    // 2) At-risk opportunities for that account
-    // You created custom checkbox "Risk Flag" on Opportunity.
-    // API name assumed: Risk_Flag__c
-    let oppQuery =
-      "SELECT Id, Name, Amount, StageName, CloseDate, Probability " +
-      "FROM Opportunity " +
-      `WHERE AccountId = '${ebcAccount.Id}' ` +
-      "AND Risk_Flag__c = true";
-
-    const oppResult = await conn.query(oppQuery);
-
-    const atRiskOpportunities = (oppResult.records || []).map((r) => ({
-      id: r.Id,
-      name: r.Name,
-      amount: r.Amount,
-      stage: r.StageName,
-      closeDate: r.CloseDate,
-      probability: r.Probability,
-    }));
-
-    const totalAmount = atRiskOpportunities.reduce(
-      (sum, o) => sum + (o.amount || 0),
-      0
-    );
-
+  if (!resp.ok) {
     return {
-      source: "Salesforce",
-      ebcAccount: {
-        id: ebcAccount.Id,
-        name: ebcAccount.Name,
-        industry: ebcAccount.Industry,
-        rating: ebcAccount.Rating,
-      },
-      atRiskSummary: {
-        opportunityCount: atRiskOpportunities.length,
-        totalAmount,
-      },
-      atRiskOpportunities,
-    };
-  } catch (err) {
-    return {
-      source: "Salesforce",
-      error: `Salesforce API error: ${String(err)}`,
+      source: "ServiceNow",
+      error: `ServiceNow API error (${resp.status})`,
+      raw: (data || text || "").toString().slice(0, 800),
     };
   }
+
+  // Expecting your endpoint already returns: totalHighPriority, byPriority, etc.
+  return data && data.serviceNow ? data.serviceNow : data;
 }
 
-// ---------- SharePoint: ask existing /api/chat-sp ----------
+async function fetchSalesforce() {
+  if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN || !SF_LOGIN_URL) {
+    return { source: "Salesforce", error: "Salesforce env vars not configured (SF_USERNAME / SF_PASSWORD / SF_TOKEN / SF_LOGIN_URL)." };
+  }
 
-async function fetchSharePointSummary(question) {
+  const conn = new jsforce.Connection({ loginUrl: SF_LOGIN_URL });
+  await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
+
+  // You said you already created these fields:
+  // Account: Is_EBC_Account__c
+  // Opportunity: Risk_Flag__c (checkbox), Amount, StageName, CloseDate, Probability
+  const ebcAccounts = await conn.query(`
+    SELECT Id, Name, Industry, Rating
+    FROM Account
+    WHERE Is_EBC_Account__c = true
+    LIMIT 1
+  `);
+
+  const ebcAccount = (ebcAccounts.records && ebcAccounts.records[0]) ? ebcAccounts.records[0] : null;
+
+  let atRiskOpps = [];
+  if (ebcAccount) {
+    const opps = await conn.query(`
+      SELECT Id, Name, Amount, StageName, CloseDate, Probability
+      FROM Opportunity
+      WHERE AccountId = '${ebcAccount.Id}'
+        AND Risk_Flag__c = true
+      ORDER BY CloseDate ASC
+      LIMIT 5
+    `);
+    atRiskOpps = opps.records || [];
+  }
+
+  const totalAmount = atRiskOpps.reduce((s, o) => s + safeNum(o.Amount), 0);
+
+  return {
+    source: "Salesforce",
+    ebcAccount: ebcAccount
+      ? { id: ebcAccount.Id, name: ebcAccount.Name, industry: ebcAccount.Industry, rating: ebcAccount.Rating }
+      : null,
+    atRiskSummary: { opportunityCount: atRiskOpps.length, totalAmount },
+    atRiskOpportunities: atRiskOpps.map(o => ({
+      id: o.Id,
+      name: o.Name,
+      amount: safeNum(o.Amount),
+      stage: o.StageName,
+      closeDate: o.CloseDate,
+      probability: safeNum(o.Probability),
+    })),
+  };
+}
+
+async function fetchSharePoint(question) {
   if (!SP_CHAT_URL) {
+    return { source: "SharePoint", error: "SP_CHAT_URL env var not configured." };
+  }
+
+  const spQuestion = buildSharePointQuery(question);
+
+  const resp = await fetch(SP_CHAT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question: spQuestion }),
+  });
+
+  const text = await resp.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) {}
+
+  if (!resp.ok || !data) {
     return {
       source: "SharePoint",
-      error: "SP_CHAT_URL env var not configured.",
+      error: `SharePoint /api/chat-sp error (${resp.status})`,
+      raw: (text || "").slice(0, 800),
     };
   }
 
-  try {
-    const resp = await fetch(SP_CHAT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+  // chat-sp returns { answer, usedFiles, candidateFiles } in your latest working version
+  return {
+    source: "SharePoint",
+    answer: data.answer || "No answer from SharePoint.",
+    usedFiles: data.usedFiles || [],
+    candidateFiles: data.candidateFiles || [],
+  };
+}
+
+function buildDeterministicExecutiveAnswer({ question, sn, sf, sp }) {
+  const bullets = [];
+
+  // 1) Salesforce
+  if (sf?.error) {
+    bullets.push({
+      title: "Revenue / customer risk visibility gap",
+      source: "Salesforce",
+      impact: `We couldn’t pull strategic account + at-risk pipeline due to an error: ${sf.error}`,
+      action: "Fix the Salesforce query/permissions and re-run. Until then, leadership is flying blind on revenue risk.",
     });
-
-    const raw = await resp.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
-      return {
-        source: "SharePoint",
-        error: "SharePoint assistant returned non-JSON response.",
-      };
-    }
-
-    if (!resp.ok) {
-      return {
-        source: "SharePoint",
-        error:
-          data.error ||
-          `SharePoint assistant error (status ${resp.status || "unknown"})`,
-      };
-    }
-
-    // Expected shape from /api/chat-sp:
-    // {
-    //   answer: "...",
-    //   chosenFile: {...} (optional),
-    //   sharePointResults: [...]
-    // }
-    return {
-      source: "SharePoint",
-      answer: data.answer || "",
-      chosenFile: data.chosenFile || null,
-      usedFiles: data.sharePointResults || [],
-    };
-  } catch (err) {
-    return {
-      source: "SharePoint",
-      error: `SharePoint fetch error: ${String(err)}`,
-    };
+  } else if (sf?.ebcAccount) {
+    const amt = shortMoneyUSD(sf.atRiskSummary?.totalAmount || 0);
+    bullets.push({
+      title: "Revenue risk on a strategic account",
+      source: "Salesforce",
+      impact: `${sf.ebcAccount.name} (Rating: ${sf.ebcAccount.rating || "N/A"}) has ${sf.atRiskSummary.opportunityCount} at-risk opportunity(ies) worth ~$${amt}.`,
+      action: "Ask the account owner for a save-plan today: next steps, blockers, and exec coverage for each at-risk deal.",
+    });
+  } else {
+    bullets.push({
+      title: "No strategic (EBC) account found in sample data",
+      source: "Salesforce",
+      impact: "The dashboard didn’t find any EBC account in Salesforce, so it can’t highlight strategic customer risk.",
+      action: "Create or tag one EBC account and link 1–2 at-risk opportunities to demonstrate the value properly.",
+    });
   }
+
+  // 2) ServiceNow
+  if (sn?.error) {
+    bullets.push({
+      title: "IT stability visibility gap",
+      source: "ServiceNow",
+      impact: `We couldn’t pull incident health due to: ${sn.error}`,
+      action: "Fix ServiceNow auth/env vars and confirm the API works from Vercel (GET).",
+    });
+  } else {
+    const p1 = (sn.byPriority || []).find(x => String(x.priority) === "1")?.count ?? null;
+    const p2 = (sn.byPriority || []).find(x => String(x.priority) === "2")?.count ?? null;
+    bullets.push({
+      title: "High priority incident load",
+      source: "ServiceNow",
+      impact: `High-priority incidents open: ${sn.totalHighPriority ?? "N/A"} (P1: ${p1 ?? "?"}, P2: ${p2 ?? "?"}).`,
+      action: "Demand a 24-hour stabilization plan: top 5 root causes, owners, and expected time to restore service health.",
+    });
+  }
+
+  // 3) SharePoint
+  if (sp?.error) {
+    bullets.push({
+      title: "Knowledge / execution visibility gap",
+      source: "SharePoint",
+      impact: `We couldn’t pull relevant docs due to: ${sp.error}`,
+      action: "Fix SP_CHAT_URL + confirm Graph permissions + verify the correct site/library scope.",
+    });
+  } else {
+    const used = (sp.usedFiles && sp.usedFiles.length) ? sp.usedFiles.map(f => f.name).join(", ") : "No file matched";
+    bullets.push({
+      title: "Execution context from internal documents",
+      source: "SharePoint",
+      impact: `Docs used: ${used}.`,
+      action: "Use this to validate whether sales/operations actions already exist, and whether teams are following the plan.",
+    });
+  }
+
+  // Headline (single sentence)
+  const headline = "One view across revenue risk, IT stability, and execution knowledge — with traceability by system.";
+
+  // Build final
+  let out = `**Leadership view (TXI POC):** ${headline}\n\n`;
+  out += `**Question asked:** ${question}\n\n`;
+  out += `**Top 3 issues + what to do next:**\n`;
+  bullets.slice(0, 3).forEach((b, i) => {
+    out += `\n${i + 1}) **${b.title}** *(Source: ${b.source})*\n`;
+    out += `- **Impact:** ${b.impact}\n`;
+    out += `- **Next action:** ${b.action}\n`;
+  });
+
+  out += `\n\n**System status:** ServiceNow: ${sn?.error ? "error" : "OK"} | Salesforce: ${sf?.error ? "error" : "OK"} | SharePoint: ${sp?.error ? "error" : "OK"}\n`;
+  out += `**Note:** This is a POC using sample data + limited scope; production would add stricter masking, access controls, and governance.\n`;
+
+  return out;
 }
 
-// ---------- Build leadership summary (NO Gemini) ----------
+async function callGeminiPolish({ question, deterministicAnswer, rawSources }) {
+  if (!GEMINI_API_KEY) return { ok: false, error: "GEMINI_API_KEY not configured" };
 
-function buildLeadershipSummary(question, sn, sf, sp) {
-  const lines = [];
+  const model = GEMINI_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
-  lines.push(
-    "Here is a leadership view of today’s biggest issues and business impact based on the available data:\n"
-  );
+  const prompt = `
+You are writing an executive-ready answer for a leadership dashboard.
 
-  // 1) Salesforce – revenue / customer risk
-  if (!sf || sf.error) {
-    lines.push(
-      `* **Revenue risk and customer visibility gap (Salesforce)**\n` +
-        `  * Business impact: Salesforce data could not be reliably retrieved (${sf?.error || "unknown error"}). ` +
-        `Leadership cannot clearly see at-risk revenue or key account health.\n`
-    );
-  } else if (
-    sf.atRiskSummary &&
-    sf.atRiskSummary.opportunityCount > 0 &&
-    sf.ebcAccount
-  ) {
-    const total = sf.atRiskSummary.totalAmount || 0;
-    lines.push(
-      `* **Revenue risk on key customer account (Salesforce)**\n` +
-        `  * Account: ${sf.ebcAccount.name} (Industry: ${sf.ebcAccount.industry || "N/A"}, Rating: ${
-          sf.ebcAccount.rating || "N/A"
-        })\n` +
-        `  * Open at-risk opportunities: ${sf.atRiskSummary.opportunityCount} deal(s) with total value around $${total}\n` +
-        `  * Leadership impact: Losing or delaying these deals directly impacts revenue and the relationship with this strategic account.\n`
-    );
-  } else {
-    lines.push(
-      `* **Limited insight into key customer accounts (Salesforce)**\n` +
-        `  * Business impact: No at-risk opportunities were identified in the current sample data. ` +
-        `This may mean low immediate risk, or it may indicate that risk flags and account health are not being tracked consistently.\n`
-    );
+User question:
+${question}
+
+Raw signals (JSON):
+${JSON.stringify(rawSources).slice(0, 12000)}
+
+Draft answer (deterministic):
+${deterministicAnswer}
+
+Rewrite the draft answer to be:
+- extremely clear for leadership
+- short, structured, skimmable
+- no hallucination: ONLY use numbers present in raw JSON
+- keep "Top 3 issues" format
+- keep system status line
+- do NOT mention internal implementation terms (Vercel, Postman, env vars) unless it's explicitly an error cause shown in rawSources
+`.trim();
+
+  const body = { contents: [{ parts: [{ text: prompt }] }] };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const raw = await resp.text();
+  let data = null;
+  try { data = JSON.parse(raw); } catch (e) {}
+
+  if (!resp.ok || !data) {
+    return { ok: false, error: `Gemini error (${resp.status})`, raw: raw.slice(0, 600) };
   }
 
-  // 2) ServiceNow – IT stability
-  if (!sn || sn.error) {
-    lines.push(
-      `* **IT service visibility gap (ServiceNow)**\n` +
-        `  * Business impact: ServiceNow data could not be retrieved (${sn?.error || "unknown error"}). ` +
-        `Leadership lacks visibility into high-priority incidents, which can hide outages and user-impacting issues.\n`
-    );
-  } else {
-    const totalHigh = sn.totalHighPriority ?? null;
-    const byPriority = Array.isArray(sn.byPriority) ? sn.byPriority : [];
+  const textOut =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    null;
 
-    let distText = "";
-    if (byPriority.length) {
-      const parts = byPriority.map(
-        (p) => `P${p.priority}: ${p.count}`
-      );
-      distText = parts.join(", ");
-    }
-
-    lines.push(
-      `* **High-priority IT incident load (ServiceNow)**\n` +
-        `  * High-priority incidents open: ${
-          totalHigh != null ? totalHigh : "N/A"
-        }\n` +
-        (distText
-          ? `  * Distribution by priority: ${distText}\n`
-          : "") +
-        `  * Leadership impact: Persistent high-priority incidents put uptime, employee productivity and customer experience at risk.\n`
-    );
-  }
-
-  // 3) SharePoint – knowledge / collaboration
-  if (!sp || sp.error) {
-    lines.push(
-      `* **Collaboration / knowledge visibility gap (SharePoint)**\n` +
-        `  * Impact: ${sp?.error || "SharePoint AI assistant is not reachable."} ` +
-        `This prevents leadership from quickly surfacing key documents and execution signals tied to strategic initiatives.\n`
-    );
-  } else if (sp.answer) {
-    lines.push(
-      `* **Knowledge insights from SharePoint (documents)**\n` +
-        `  * Assistant summary: ${sp.answer.trim()}\n`
-    );
-  } else {
-    lines.push(
-      `* **Limited document insights from SharePoint**\n` +
-        `  * Impact: No strong document signals were surfaced in this query. ` +
-        `Either relevant documents are not consistently tagged/named, or the current library does not yet contain rich execution data.\n`
-    );
-  }
-
-  lines.push(
-    "\n---\n" +
-      "This is a Proof of Concept using limited sample data, but it shows how a single leadership question can pull together revenue risk (Salesforce), IT stability (ServiceNow), and knowledge/collaboration signals (SharePoint) into one executive view."
-  );
-
-  return lines.join("");
+  return textOut ? { ok: true, text: textOut } : { ok: false, error: "Gemini returned empty text" };
 }
-
-// ---------- Main handler ----------
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    // Allow preflight if ever used cross-origin
-    res.status(200).end();
-    return;
-  }
+  setCors(res);
 
-  if (req.method !== "POST") {
-    res.status(405).json({
-      error: 'Use POST with JSON body { "question": "..." }',
-    });
-    return;
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
 
   try {
     const { question } = req.body || {};
-    const q =
-      typeof question === "string" && question.trim()
-        ? question.trim()
-        : "What are the top 3 operational issues I should care about today, and what’s the business impact?";
+    if (!question || typeof question !== "string") {
+      return res.status(400).json({ error: 'Missing "question" in request body.' });
+    }
 
-    // Fetch all systems in parallel
-    const [sn, sf, sp] = await Promise.all([
-      fetchServiceNowSummary(),
-      fetchSalesforceSummary(),
-      fetchSharePointSummary(q),
+    // pull all three in parallel
+    const [sn, sf, sp] = await Promise.allSettled([
+      fetchServiceNow(),
+      fetchSalesforce(),
+      fetchSharePoint(question),
     ]);
 
-    const combinedAnswer = buildLeadershipSummary(q, sn, sf, sp);
+    const snVal = sn.status === "fulfilled" ? sn.value : { source: "ServiceNow", error: String(sn.reason) };
+    const sfVal = sf.status === "fulfilled" ? sf.value : { source: "Salesforce", error: String(sf.reason) };
+    const spVal = sp.status === "fulfilled" ? sp.value : { source: "SharePoint", error: String(sp.reason) };
 
-    res.status(200).json({
-      question: q,
-      combinedAnswer,
-      sources: {
-        serviceNow: sn,
-        salesforce: sf,
-        sharePoint: sp,
-      },
+    const deterministic = buildDeterministicExecutiveAnswer({
+      question,
+      sn: snVal,
+      sf: sfVal,
+      sp: spVal,
+    });
+
+    // Gemini is optional "polish"
+    const rawSources = { serviceNow: snVal, salesforce: sfVal, sharePoint: spVal };
+    const polished = await callGeminiPolish({
+      question,
+      deterministicAnswer: deterministic,
+      rawSources,
+    });
+
+    const finalAnswer = polished.ok ? polished.text : deterministic;
+
+    return res.status(200).json({
+      question,
+      combinedAnswer: finalAnswer,
+      sources: rawSources,
       generatedAt: new Date().toISOString(),
+      gemini: polished.ok ? { used: true, model: GEMINI_MODEL || "gemini-2.5-flash" } : { used: false, error: polished.error },
     });
   } catch (err) {
-    console.error("[/api/txi-dashboard ERROR]:", err);
-    res.status(500).json({
-      error: "Internal error in /api/txi-dashboard.",
+    return res.status(500).json({
+      error: "Internal error in /api/txi-dashboard",
       details: String(err),
     });
   }
