@@ -2,435 +2,192 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Schindler Total Intelligence – Leadership Console</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root {
-      --navy: #011b3b;
-      --navy-light: #062955;
-      --bg: #f5f7fb;
-      --primary: #0070f3;
-      --danger: #c0392b;
-      --border: #d0d7e2;
-      --text-main: #111827;
-      --text-muted: #6b7280;
+    :root{
+      --navy:#061a3a;
+      --bg:#f5f7fb;
+      --card:#ffffff;
+      --border:#e6e9f2;
+      --text:#111827;
+      --muted:#6b7280;
+      --ok:#16a34a;
+      --err:#ef4444;
+      --warn:#f59e0b;
+      --shadow:0 6px 18px rgba(15, 23, 42, 0.08);
+      --radius:16px;
     }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-        sans-serif;
-      background: var(--bg);
-      color: var(--text-main);
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      color:var(--text);
+      background:var(--bg);
     }
-
-    header {
-      background: var(--navy);
-      color: white;
-      padding: 16px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+    .top{
+      background:var(--navy);
+      color:#fff;
+      padding:22px 18px;
     }
-
-    header h1 {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 600;
+    .top .wrap{max-width:1100px;margin:0 auto}
+    .top h1{margin:0;font-size:22px;font-weight:800}
+    .top p{margin:6px 0 0;color:rgba(255,255,255,.85);font-size:13px}
+    .container{
+      max-width:1100px;
+      margin:18px auto;
+      padding:0 14px 28px;
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:14px;
     }
-
-    header p {
-      margin: 4px 0 0 0;
-      font-size: 13px;
-      color: #d1d5db;
+    .card{
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:16px;
+      min-height:420px;
     }
-
-    .tag {
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.2);
-      font-size: 11px;
-      color: #e5e7eb;
-      white-space: nowrap;
+    h2{margin:0 0 6px;font-size:16px}
+    .sub{color:var(--muted);font-size:13px;margin:0 0 10px}
+    textarea{
+      width:100%;
+      min-height:140px;
+      resize:vertical;
+      padding:12px;
+      border-radius:12px;
+      border:1px solid var(--border);
+      outline:none;
+      font-size:14px;
+      line-height:1.4;
+      background:#fff;
     }
-
-    main {
-      max-width: 1120px;
-      margin: 24px auto;
-      padding: 0 16px 32px;
-      display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr);
-      gap: 24px;
+    .row{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+    button{
+      border:none;
+      background:#2563eb;
+      color:#fff;
+      padding:10px 14px;
+      border-radius:999px;
+      font-weight:700;
+      cursor:pointer;
     }
-
-    @media (max-width: 900px) {
-      main {
-        grid-template-columns: 1fr;
-      }
+    button.secondary{
+      background:#eef2ff;
+      color:#1f2a44;
+      border:1px solid var(--border);
     }
-
-    .card {
-      background: white;
-      border-radius: 16px;
-      border: 1px solid var(--border);
-      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.07);
-      padding: 20px 20px 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .examples{
+      margin-top:10px;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.5;
     }
-
-    .card h2 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 600;
+    .chips{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 12px}
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      font-size:12px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid var(--border);
+      background:#fff;
     }
-
-    .subtitle {
-      font-size: 13px;
-      color: var(--text-muted);
-      margin: 2px 0 0 0;
+    .dot{width:8px;height:8px;border-radius:999px;background:var(--muted)}
+    .dot.ok{background:var(--ok)}
+    .dot.err{background:var(--err)}
+    .dot.warn{background:var(--warn)}
+    .answer{
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:12px;
+      background:#fbfcff;
+      min-height:290px;
+      white-space:pre-wrap; /* IMPORTANT: no truncation */
+      word-wrap:break-word;
+      line-height:1.5;
+      font-size:14px;
     }
-
-    .label {
-      font-size: 13px;
-      font-weight: 500;
-      margin-bottom: 4px;
+    .muted{color:var(--muted)}
+    .debug{
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px dashed var(--border);
+      background:#fff;
+      color:var(--muted);
+      font-size:12px;
+      display:none; /* hidden by default */
+      white-space:pre-wrap;
     }
-
-    textarea {
-      width: 100%;
-      min-height: 120px;
-      resize: vertical;
-      padding: 12px 12px 12px 12px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      font-size: 14px;
-      font-family: inherit;
-      line-height: 1.45;
+    .footerNote{
+      margin-top:10px;
+      color:var(--muted);
+      font-size:12px;
     }
-
-    textarea:focus {
-      outline: 2px solid var(--primary);
-      outline-offset: 1px;
-      border-color: var(--primary);
-    }
-
-    .helper {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 6px;
-    }
-
-    .helper code {
-      font-size: 11px;
-      background: #f3f4f6;
-      padding: 2px 4px;
-      border-radius: 4px;
-    }
-
-    .examples {
-      margin-top: 10px;
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-
-    .examples p {
-      margin: 0 0 4px 0;
-      font-weight: 500;
-      color: var(--text-main);
-      font-size: 12px;
-    }
-
-    .examples li {
-      margin-bottom: 3px;
-    }
-
-    .actions {
-      margin-top: 12px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    button.primary {
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 999px;
-      padding: 8px 18px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    button.primary:disabled {
-      opacity: 0.6;
-      cursor: default;
-    }
-
-    button.secondary {
-      background: white;
-      color: var(--text-main);
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      font-size: 13px;
-      padding: 6px 10px;
-      cursor: pointer;
-    }
-
-    .spinner {
-      width: 14px;
-      height: 14px;
-      border-radius: 999px;
-      border: 2px solid rgba(255, 255, 255, 0.6);
-      border-top-color: transparent;
-      animation: spin 0.7s linear infinite;
-    }
-
-    @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
-    }
-
-    .answer-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .answer-header h3 {
-      margin: 0;
-      font-size: 14px;
-      font-weight: 600;
-    }
-
-    .badge-row {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      font-size: 11px;
-    }
-
-    .badge {
-      padding: 2px 8px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: #f9fafb;
-    }
-
-    .badge.ok {
-      border-color: #22c55e33;
-      color: #166534;
-      background: #dcfce7;
-    }
-
-    .badge.err {
-      border-color: #fecaca;
-      color: #b91c1c;
-      background: #fee2e2;
-    }
-
-    .answer-body {
-      margin-top: 10px;
-      font-size: 14px;
-      line-height: 1.55;
-      white-space: pre-wrap;
-    }
-
-    .answer-empty {
-      margin-top: 10px;
-      font-size: 13px;
-      color: var(--text-muted);
-      font-style: italic;
-    }
-
-    .error-text {
-      margin-top: 8px;
-      font-size: 13px;
-      color: var(--danger);
-      white-space: pre-wrap;
+    @media (max-width: 900px){
+      .container{grid-template-columns:1fr}
     }
   </style>
 </head>
 <body>
-  <header>
-    <div>
+  <div class="top">
+    <div class="wrap">
       <h1>Schindler Total Intelligence – Leadership Console</h1>
       <p>Ask one question and combine live signals from ServiceNow, Salesforce and SharePoint into one executive view.</p>
     </div>
-    <div class="tag">TXI POC • Vercel Backend</div>
-  </header>
+  </div>
 
-  <main>
-    <!-- LEFT: QUESTION -->
-    <section class="card">
-      <div>
-        <h2>Ask the organisation one question</h2>
-        <p class="subtitle">Type a leadership-level question in plain language.</p>
+  <div class="container">
+    <!-- LEFT -->
+    <div class="card">
+      <h2>Ask the organisation one question</h2>
+      <p class="sub">Type a leadership-level question in plain language.</p>
+
+      <label class="sub" for="q">Question</label>
+      <textarea id="q">Give me a leadership view of today’s biggest risks and customer impacts.</textarea>
+
+      <div class="row">
+        <button id="askBtn">Ask</button>
+        <button id="exampleBtn" class="secondary">Use example question</button>
+        <button id="toggleDebugBtn" class="secondary" style="margin-left:auto;">Debug</button>
       </div>
 
-      <label class="label" for="questionInput">Question</label>
-      <textarea
-        id="questionInput"
-        placeholder="Give me a leadership view of today’s biggest risks and customer impacts."
-      ></textarea>
-
       <div class="examples">
-        <p>Examples:</p>
+        <b>Examples:</b>
         <ul>
           <li>What are the top 3 operational issues I should care about today, and what’s the business impact?</li>
           <li>Give me a leadership view of today’s biggest risks and customer impacts.</li>
         </ul>
       </div>
 
-      <div class="actions">
-        <button id="askButton" class="primary">
-          <span id="askLabel">Ask</span>
-          <span id="askSpinner" class="spinner" style="display:none"></span>
-        </button>
-        <button id="useExample" class="secondary">Use example question</button>
+      <!-- REMOVE the ugly yellow line by not showing it.
+           If you still want it, we show it only in Debug. -->
+      <div class="debug" id="debugBox"></div>
+
+      <div class="footerNote">
+        Backend endpoint: <b>POST</b> <code>/api/txi-dashboard</code> with JSON body <code>{"question":"..."}</code>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div class="card">
+      <h2>Combined view across systems</h2>
+      <p class="sub">AI assistant answer with traceability to each source system.</p>
+
+      <div class="chips">
+        <div class="chip"><span class="dot" id="sfDot"></span> Salesforce <span id="sfTxt" class="muted">—</span></div>
+        <div class="chip"><span class="dot" id="snDot"></span> ServiceNow <span id="snTxt" class="muted">—</span></div>
+        <div class="chip"><span class="dot" id="spDot"></span> SharePoint <span id="spTxt" class="muted">—</span></div>
       </div>
 
-      <div class="helper">
-        Backend endpoint: <code>POST /api/txi-dashboard</code> with JSON body
-        <code>{"question": "..."}</code>
-      </div>
+      <div id="answer" class="answer muted">Could not generate an answer yet. Ask a question on the left.</div>
+    </div>
+  </div>
 
-      <div id="backendError" class="error-text" style="display:none"></div>
-    </section>
-
-    <!-- RIGHT: ANSWER -->
-    <section class="card">
-      <div class="answer-header">
-        <div>
-          <h3>Combined view across systems</h3>
-          <p class="subtitle">AI assistant answer with traceability to each source system.</p>
-        </div>
-        <div class="badge-row">
-          <span id="sfBadge" class="badge">Salesforce</span>
-          <span id="snBadge" class="badge">ServiceNow</span>
-          <span id="spBadge" class="badge">SharePoint</span>
-        </div>
-      </div>
-
-      <div id="answerBody" class="answer-empty">
-        Could not generate an answer yet. Ask a question on the left.
-      </div>
-    </section>
-  </main>
-
-  <script>
-    const questionInput = document.getElementById('questionInput');
-    const askButton = document.getElementById('askButton');
-    const askLabel = document.getElementById('askLabel');
-    const askSpinner = document.getElementById('askSpinner');
-    const useExample = document.getElementById('useExample');
-    const backendError = document.getElementById('backendError');
-    const answerBody = document.getElementById('answerBody');
-
-    const sfBadge = document.getElementById('sfBadge');
-    const snBadge = document.getElementById('snBadge');
-    const spBadge = document.getElementById('spBadge');
-
-    function setLoading(isLoading) {
-      askButton.disabled = isLoading;
-      askSpinner.style.display = isLoading ? 'inline-block' : 'none';
-      askLabel.textContent = isLoading ? 'Thinking…' : 'Ask';
-    }
-
-    function setSourceStatus(badgeEl, src) {
-      if (!src) {
-        badgeEl.className = 'badge';
-        badgeEl.textContent = badgeEl.textContent.split(' ')[0];
-        return;
-      }
-      if (src.error) {
-        badgeEl.className = 'badge err';
-        badgeEl.textContent = badgeEl.textContent.split(' ')[0] + ' • error';
-      } else {
-        badgeEl.className = 'badge ok';
-        badgeEl.textContent = badgeEl.textContent.split(' ')[0] + ' • OK';
-      }
-    }
-
-    async function askQuestion() {
-      const q = questionInput.value.trim();
-      backendError.style.display = 'none';
-      backendError.textContent = '';
-
-      if (!q) {
-        backendError.style.display = 'block';
-        backendError.textContent = 'Please type a question first.';
-        return;
-      }
-
-      setLoading(true);
-      answerBody.className = 'answer-empty';
-      answerBody.textContent = 'Waiting for response from backend…';
-
-      try {
-        const res = await fetch('/api/txi-dashboard', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ question: q })
-        });
-
-        const data = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-          backendError.style.display = 'block';
-          backendError.textContent =
-            'Backend error: ' + (data.error || res.status + ' ' + res.statusText);
-          answerBody.className = 'answer-empty';
-          answerBody.textContent = 'Could not generate an answer.';
-          return;
-        }
-
-        // Show combined answer
-        if (data.combinedAnswer) {
-          answerBody.className = 'answer-body';
-          answerBody.textContent = data.combinedAnswer;
-        } else {
-          answerBody.className = 'answer-empty';
-          answerBody.textContent = 'No combined answer returned from backend.';
-        }
-
-        // Update per-source badges
-        const sources = data.sources || {};
-        setSourceStatus(sfBadge, sources.salesforce);
-        setSourceStatus(snBadge, sources.serviceNow);
-        setSourceStatus(spBadge, sources.sharePoint);
-      } catch (err) {
-        backendError.style.display = 'block';
-        backendError.textContent = 'Frontend error calling /api/txi-dashboard: ' + err.message;
-        answerBody.className = 'answer-empty';
-        answerBody.textContent = 'Could not generate an answer.';
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    askButton.addEventListener('click', (e) => {
-      e.preventDefault(); // stop any default form submit
-      askQuestion();
-    });
-
-    useExample.addEventListener('click', (e) => {
-      e.preventDefault();
-      questionInput.value =
-        "What are the top 3 operational issues I should care about today, and what’s the business impact?";
-    });
-  </script>
+  <script src="./txi-dashboard-ui.js"></script>
 </body>
 </html>
