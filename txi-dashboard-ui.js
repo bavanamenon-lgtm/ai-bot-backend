@@ -1,3 +1,4 @@
+// txi-dashboard-ui.js
 (function () {
   const $ = (id) => document.getElementById(id);
 
@@ -21,27 +22,24 @@
 
   function systemStatus(srcObj) {
     if (!srcObj) return "warn";
+    if (srcObj.ok === true) return "OK";
+    if (srcObj.ok === false) return "error";
     if (srcObj.error) return "error";
-    return "OK";
+    return "warn";
   }
 
   function toExecFormat(combinedAnswer, sources) {
-    // If backend already returns a well-formatted executive answer, keep it.
-    // But ensure it’s readable and not one long blob.
     let text = (combinedAnswer || "").trim();
 
-    // If Gemini returns something messy, we lightly normalize here (no truncation).
-    // Keep it simple: ensure blank lines between numbered points.
     text = text
       .replace(/\r\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .replace(/(\n\d\))/g, "\n\n$1");
 
-    // Add traceability footer if missing
     if (!/Traceability:/i.test(text)) {
-      const sf = sources?.salesforce?.error ? "Salesforce(error)" : "Salesforce";
-      const sn = sources?.serviceNow?.error ? "ServiceNow(error)" : "ServiceNow";
-      const sp = sources?.sharePoint?.error ? "SharePoint(error)" : "SharePoint";
+      const sf = sources?.salesforce?.ok ? "Salesforce(OK)" : "Salesforce(error)";
+      const sn = sources?.serviceNow?.ok ? "ServiceNow(OK)" : "ServiceNow(error)";
+      const sp = sources?.sharePoint?.ok ? "SharePoint(OK)" : "SharePoint(error)";
       text += `\n\nTraceability: ${sf} | ${sn} | ${sp}`;
     }
 
@@ -55,6 +53,12 @@
     askBtn.disabled = true;
     answerEl.classList.add("muted");
     answerEl.textContent = "Working on it…";
+
+    // Ensure answer area never visually clips
+    answerEl.style.whiteSpace = "pre-wrap";
+    answerEl.style.wordBreak = "break-word";
+    answerEl.style.maxHeight = "70vh";
+    answerEl.style.overflow = "auto";
 
     // Reset chips while loading
     setDot(sfDot, "warn"); setDot(snDot, "warn"); setDot(spDot, "warn");
@@ -72,6 +76,7 @@
       try { json = JSON.parse(rawText); } catch { json = null; }
 
       if (!r.ok || !json) {
+        answerEl.classList.remove("muted");
         answerEl.textContent = `Backend error: ${r.status}\n\n${rawText}`;
         debugBox.textContent = rawText;
         return;
@@ -93,19 +98,25 @@
       answerEl.classList.remove("muted");
       answerEl.textContent = combined;
 
+      // PROOF: not truncating
+      console.log("combinedAnswer length:", combined.length);
+      console.log("combinedAnswer tail:", combined.slice(-200));
+
       // Debug (optional)
       const debugPayload = {
         httpStatus: r.status,
         generatedAt: json.generatedAt,
         gemini: json.gemini,
         sources: {
-          salesforce: sources.salesforce?.error ? { error: sources.salesforce.error } : { ok: true },
-          serviceNow: sources.serviceNow?.error ? { error: sources.serviceNow.error } : { ok: true },
-          sharePoint: sources.sharePoint?.error ? { error: sources.sharePoint.error } : { ok: true }
+          salesforce: sources.salesforce?.ok ? { ok: true } : { ok: false, error: sources.salesforce?.error || "unknown" },
+          serviceNow: sources.serviceNow?.ok ? { ok: true } : { ok: false, error: sources.serviceNow?.error || "unknown" },
+          sharePoint: sources.sharePoint?.ok ? { ok: true } : { ok: false, error: sources.sharePoint?.error || "unknown" }
         }
       };
       debugBox.textContent = JSON.stringify(debugPayload, null, 2);
+
     } catch (e) {
+      answerEl.classList.remove("muted");
       answerEl.textContent = `Client error:\n${e?.message || String(e)}`;
       debugBox.textContent = String(e?.stack || e);
     } finally {
@@ -114,6 +125,7 @@
   }
 
   askBtn.addEventListener("click", ask);
+
   exampleBtn.addEventListener("click", () => {
     qEl.value = "What are the top 3 operational issues I should care about today, and what’s the business impact?";
   });
