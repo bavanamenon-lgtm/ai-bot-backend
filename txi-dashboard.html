@@ -2,192 +2,313 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Schindler Total Intelligence – Leadership Console</title>
   <style>
     :root{
       --navy:#061a3a;
-      --bg:#f5f7fb;
+      --bg:#f4f7fb;
       --card:#ffffff;
-      --border:#e6e9f2;
-      --text:#111827;
-      --muted:#6b7280;
-      --ok:#16a34a;
-      --err:#ef4444;
-      --warn:#f59e0b;
-      --shadow:0 6px 18px rgba(15, 23, 42, 0.08);
-      --radius:16px;
+      --border:#e6edf7;
+      --text:#0b1320;
+      --muted:#5b6b84;
+      --ok:#1f9d55;
+      --err:#d64545;
+      --shadow: 0 10px 24px rgba(11,19,32,.08);
+      --radius: 16px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
     }
-    *{box-sizing:border-box}
+
     body{
       margin:0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      color:var(--text);
+      font-family:var(--sans);
       background:var(--bg);
+      color:var(--text);
     }
-    .top{
+
+    header{
       background:var(--navy);
       color:#fff;
       padding:22px 18px;
     }
-    .top .wrap{max-width:1100px;margin:0 auto}
-    .top h1{margin:0;font-size:22px;font-weight:800}
-    .top p{margin:6px 0 0;color:rgba(255,255,255,.85);font-size:13px}
-    .container{
+    header .title{
+      font-size:20px;
+      font-weight:700;
+      margin:0 0 6px 0;
+    }
+    header .sub{
+      margin:0;
+      opacity:.85;
+      font-size:13px;
+    }
+
+    .wrap{
       max-width:1100px;
       margin:18px auto;
-      padding:0 14px 28px;
+      padding:0 14px 28px 14px;
       display:grid;
       grid-template-columns: 1fr 1fr;
       gap:14px;
     }
+
     .card{
       background:var(--card);
       border:1px solid var(--border);
       border-radius:var(--radius);
       box-shadow:var(--shadow);
       padding:16px;
-      min-height:420px;
     }
-    h2{margin:0 0 6px;font-size:16px}
-    .sub{color:var(--muted);font-size:13px;margin:0 0 10px}
+
+    h2{
+      margin:0 0 6px 0;
+      font-size:16px;
+    }
+    .hint{
+      margin:0 0 10px 0;
+      color:var(--muted);
+      font-size:13px;
+    }
+
     textarea{
       width:100%;
       min-height:140px;
-      resize:vertical;
-      padding:12px;
-      border-radius:12px;
       border:1px solid var(--border);
-      outline:none;
+      border-radius:12px;
+      padding:12px;
       font-size:14px;
-      line-height:1.4;
-      background:#fff;
+      outline:none;
+      resize:vertical;
+      box-sizing:border-box;
     }
-    .row{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+
+    .row{
+      display:flex;
+      gap:10px;
+      margin-top:10px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
     button{
-      border:none;
-      background:#2563eb;
+      border:0;
+      background:#1e63ff;
       color:#fff;
-      padding:10px 14px;
+      padding:10px 16px;
       border-radius:999px;
       font-weight:700;
       cursor:pointer;
     }
     button.secondary{
-      background:#eef2ff;
-      color:#1f2a44;
-      border:1px solid var(--border);
+      background:#eef3ff;
+      color:#1e63ff;
+      border:1px solid #cfe0ff;
     }
-    button:disabled{opacity:.55;cursor:not-allowed}
+    button:disabled{
+      opacity:.6;
+      cursor:not-allowed;
+    }
+
     .examples{
       margin-top:10px;
       color:var(--muted);
       font-size:13px;
-      line-height:1.5;
+      line-height:1.35;
     }
-    .chips{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 12px}
-    .chip{
-      display:inline-flex;
+
+    .statusRow{
+      display:flex;
+      justify-content:space-between;
       align-items:center;
+      gap:10px;
+      margin-bottom:10px;
+    }
+
+    .pills{
+      display:flex;
       gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .pill{
       font-size:12px;
       padding:6px 10px;
       border-radius:999px;
       border:1px solid var(--border);
       background:#fff;
     }
-    .dot{width:8px;height:8px;border-radius:999px;background:var(--muted)}
-    .dot.ok{background:var(--ok)}
-    .dot.err{background:var(--err)}
-    .dot.warn{background:var(--warn)}
-    .answer{
+    .pill.ok{
+      border-color: rgba(31,157,85,.35);
+      color:var(--ok);
+      background: rgba(31,157,85,.06);
+      font-weight:700;
+    }
+    .pill.err{
+      border-color: rgba(214,69,69,.35);
+      color:var(--err);
+      background: rgba(214,69,69,.06);
+      font-weight:700;
+    }
+
+    /* THIS is the fix for “truncation”: */
+    pre{
+      margin:0;
+      white-space: pre-wrap;      /* keep line breaks */
+      word-break: break-word;     /* long text wraps */
+      font-family: var(--sans);   /* readable, not monospace */
+      font-size:14px;
+      line-height:1.45;
+    }
+
+    .smallMono{
+      margin-top:10px;
+      font-family:var(--mono);
+      font-size:12px;
+      color:#324055;
+      background:#f7f9fc;
       border:1px solid var(--border);
       border-radius:12px;
-      padding:12px;
-      background:#fbfcff;
-      min-height:290px;
-      white-space:pre-wrap; /* IMPORTANT: no truncation */
-      word-wrap:break-word;
-      line-height:1.5;
-      font-size:14px;
+      padding:10px;
+      display:none;
     }
-    .muted{color:var(--muted)}
-    .debug{
-      margin-top:10px;
-      padding:10px 12px;
-      border-radius:12px;
-      border:1px dashed var(--border);
-      background:#fff;
-      color:var(--muted);
-      font-size:12px;
-      display:none; /* hidden by default */
-      white-space:pre-wrap;
-    }
-    .footerNote{
-      margin-top:10px;
-      color:var(--muted);
-      font-size:12px;
-    }
+
     @media (max-width: 900px){
-      .container{grid-template-columns:1fr}
+      .wrap{ grid-template-columns: 1fr; }
     }
   </style>
 </head>
-<body>
-  <div class="top">
-    <div class="wrap">
-      <h1>Schindler Total Intelligence – Leadership Console</h1>
-      <p>Ask one question and combine live signals from ServiceNow, Salesforce and SharePoint into one executive view.</p>
-    </div>
-  </div>
 
-  <div class="container">
-    <!-- LEFT -->
+<body>
+  <header>
+    <p class="title">Schindler Total Intelligence – Leadership Console</p>
+    <p class="sub">Ask one question and combine live signals from ServiceNow, Salesforce, and SharePoint into a single executive view.</p>
+  </header>
+
+  <div class="wrap">
     <div class="card">
       <h2>Ask the organisation one question</h2>
-      <p class="sub">Type a leadership-level question in plain language.</p>
+      <p class="hint">Type a leadership-level question in plain language.</p>
 
-      <label class="sub" for="q">Question</label>
       <textarea id="q">Give me a leadership view of today’s biggest risks and customer impacts.</textarea>
 
       <div class="row">
         <button id="askBtn">Ask</button>
         <button id="exampleBtn" class="secondary">Use example question</button>
-        <button id="toggleDebugBtn" class="secondary" style="margin-left:auto;">Debug</button>
       </div>
 
       <div class="examples">
-        <b>Examples:</b>
+        <div><b>Examples:</b></div>
         <ul>
           <li>What are the top 3 operational issues I should care about today, and what’s the business impact?</li>
           <li>Give me a leadership view of today’s biggest risks and customer impacts.</li>
         </ul>
       </div>
 
-      <!-- REMOVE the ugly yellow line by not showing it.
-           If you still want it, we show it only in Debug. -->
-      <div class="debug" id="debugBox"></div>
-
-      <div class="footerNote">
-        Backend endpoint: <b>POST</b> <code>/api/txi-dashboard</code> with JSON body <code>{"question":"..."}</code>
-      </div>
+      <div id="debugBox" class="smallMono"></div>
     </div>
 
-    <!-- RIGHT -->
     <div class="card">
-      <h2>Combined view across systems</h2>
-      <p class="sub">AI assistant answer with traceability to each source system.</p>
-
-      <div class="chips">
-        <div class="chip"><span class="dot" id="sfDot"></span> Salesforce <span id="sfTxt" class="muted">—</span></div>
-        <div class="chip"><span class="dot" id="snDot"></span> ServiceNow <span id="snTxt" class="muted">—</span></div>
-        <div class="chip"><span class="dot" id="spDot"></span> SharePoint <span id="spTxt" class="muted">—</span></div>
+      <div class="statusRow">
+        <div>
+          <h2 style="margin:0;">Combined view across systems</h2>
+          <p class="hint" style="margin:4px 0 0 0;">AI assistant answer with traceability to each source system.</p>
+        </div>
+        <div class="pills">
+          <span id="sfPill" class="pill">Salesforce</span>
+          <span id="snPill" class="pill">ServiceNow</span>
+          <span id="spPill" class="pill">SharePoint</span>
+        </div>
       </div>
 
-      <div id="answer" class="answer muted">Could not generate an answer yet. Ask a question on the left.</div>
+      <pre id="answer">Could not generate an answer yet. Ask a question on the left.</pre>
     </div>
   </div>
 
-  <script src="./txi-dashboard-ui.js"></script>
+<script>
+  const askBtn = document.getElementById("askBtn");
+  const exampleBtn = document.getElementById("exampleBtn");
+  const qEl = document.getElementById("q");
+  const ansEl = document.getElementById("answer");
+  const debugBox = document.getElementById("debugBox");
+
+  const sfPill = document.getElementById("sfPill");
+  const snPill = document.getElementById("snPill");
+  const spPill = document.getElementById("spPill");
+
+  function setPill(pill, ok, label){
+    pill.classList.remove("ok","err");
+    pill.textContent = label;
+    if (ok === true) pill.classList.add("ok");
+    if (ok === false) pill.classList.add("err");
+  }
+
+  function resetPills(){
+    setPill(sfPill, null, "Salesforce");
+    setPill(snPill, null, "ServiceNow");
+    setPill(spPill, null, "SharePoint");
+  }
+
+  function showDebug(obj){
+    debugBox.style.display = "block";
+    debugBox.textContent = JSON.stringify(obj, null, 2);
+  }
+
+  function hideDebug(){
+    debugBox.style.display = "none";
+    debugBox.textContent = "";
+  }
+
+  exampleBtn.addEventListener("click", () => {
+    qEl.value = "What are the top 3 operational issues I should care about today, and what’s the business impact?";
+  });
+
+  askBtn.addEventListener("click", async () => {
+    hideDebug();
+    resetPills();
+
+    const question = (qEl.value || "").trim();
+    if(!question){
+      ansEl.textContent = "Please type a question.";
+      return;
+    }
+
+    askBtn.disabled = true;
+    ansEl.textContent = "Thinking…";
+
+    try{
+      const resp = await fetch("/api/txi-dashboard", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ question })
+      });
+
+      const text = await resp.text();
+      let json = null;
+      try{ json = JSON.parse(text); }catch(e){}
+
+      if(!resp.ok || !json){
+        ansEl.textContent = "Backend error. See debug.";
+        showDebug({ httpStatus: resp.status, raw: text });
+        askBtn.disabled = false;
+        return;
+      }
+
+      // Status pills
+      const s = json.sources || {};
+      setPill(sfPill, !s.salesforce?.error, s.salesforce?.error ? "Salesforce • error" : "Salesforce • OK");
+      setPill(snPill, !s.serviceNow?.error, s.serviceNow?.error ? "ServiceNow • error" : "ServiceNow • OK");
+      setPill(spPill, !s.sharePoint?.error, s.sharePoint?.error ? "SharePoint • error" : "SharePoint • OK");
+
+      // IMPORTANT: show FULL answer, no slicing, no truncation
+      ansEl.textContent = json.combinedAnswer || "No answer returned.";
+
+      askBtn.disabled = false;
+    }catch(err){
+      ansEl.textContent = "Client error. See debug.";
+      showDebug({ error: String(err) });
+      askBtn.disabled = false;
+    }
+  });
+</script>
 </body>
 </html>
