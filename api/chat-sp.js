@@ -1,466 +1,63 @@
+// api/chat-sp.js
 //
-// /api/chat-sp.js
-// ENTERPRISE-GRADE SHAREPOINT ASSISTANT (UPDATED: KEYWORD-BASED SEARCH TERM)
+// SharePoint -> Graph Drive Search -> Extract -> Gemini summary (SAFE MODE)
 //
-// - Searches VationGTM "Documents" drive via Microsoft Graph
-// - Expands folders to find supported files inside
-// - Supported types: .txt, .csv, .docx, .xlsx, .pdf
-// - Evaluates up to 3 best candidates using Gemini
-// - Returns clear summary + which files were considered
-//
+// Fixes included:
+// - Sanitise search term (avoid dangerous characters like ? ' etc).
+// - Deterministic TXI keyword search for leadership questions.
+// - Summarise top N files (not only one).
+// - Always return JSON.
 
 const {
   GRAPH_TENANT_ID,
   GRAPH_CLIENT_ID,
   GRAPH_CLIENT_SECRET,
   GEMINI_API_KEY,
+  GEMINI_MODEL, // optional
 } = process.env;
 
-// ---------- CORS ----------
+export const config = { runtime: "nodejs" };
 
+// -------- Simple CORS helpers --------
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-// ---------- Helpers: extensions, filters ----------
-
-function getExtension(name = "") {
-  const parts = name.split(".");
-  if (parts.length < 2) return "";
-  return parts.pop().toLowerCase();
-}
-
-function isSupportedExtension(ext) {
-  return ["txt", "csv", "docx", "xlsx", "pdf"].includes(ext);
-}
-
-// ---------- Search term extractor (UPDATED: SAFE + KEYWORDS) ----------
-
-function buildSearchTerm(question) {
-  if (!question) return "";
-  let q = question.trim();
-
-  // 1) Quoted phrase wins
-  const quoted = q.match(
-    /["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]+)["'\u201C\u201D\u2018\u2019]/
-  );
-  if (quoted && quoted[1]) {
-    q = quoted[1].trim();
-  }
-
-  // 2) Explicit filename pattern wins
-  const filenameMatch = q.match(/([A-Za-z0-9_\- ]+\.[A-Za-z0-9]{1,10})/);
-  if (filenameMatch && filenameMatch[1]) {
-    q = filenameMatch[1].trim();
-  }
-
-  // 3) Phrases like "summarise X document/file"
-  const docMatch = q.match(
-    /summaris\w*\s+(.+?)\s+(document|file|doc|docs|documents)/i
-  );
-  if (docMatch && docMatch[1]) {
-    q = docMatch[1].trim();
-  }
-
-  // 4) Remove common filler prefixes
-  const prefixes = [
-    "can you",
-    "could you",
-    "please",
-    "would you",
-    "search",
-    "find",
-    "show me",
-    "give me",
-    "share",
-    "summarise",
-    "summarize",
-    "do we have any",
-    "do we have",
-    "i need",
-    "i want",
-    "is there",
-  ];
-  const lower = q.toLowerCase();
-  for (const prefix of prefixes) {
-    if (lower.startsWith(prefix + " ")) {
-      q = q.slice(prefix.length).trim();
-      break;
-    }
-  }
-
-  // 5) Strip punctuation that can break Graph path (? < > # & etc.)
-  q = q.replace(/[?<>#&]/g, " ").replace(/\s+/g, " ").trim();
-
-  // 6) Keyword extraction: drop stopwords, keep only meaningful tokens
-  const stopWords = new Set([
-    "a",
-    "an",
-    "the",
-    "any",
-    "do",
-    "does",
-    "we",
-    "have",
-    "has",
-    "is",
-    "are",
-    "there",
-    "documents",
-    "document",
-    "docs",
-    "files",
-    "file",
-    "related",
-    "to",
-    "for",
-    "of",
-    "about",
-    "on",
-    "with",
-    "and",
-    "or",
-    "in",
-    "our",
-    "my",
-    "your",
-  ]);
-
-  const tokens = q
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-
-  const keywords = tokens.filter((t) => !stopWords.has(t.toLowerCase()));
-
-  if (keywords.length) {
-    q = keywords.join(" ");
-  }
-
-  // 7) Truncate to avoid insanely long queries
-  return q.slice(0, 200);
-}
-
-// ---------- Microsoft Graph auth ----------
-
-async function getGraphToken() {
-  if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
-    throw new Error(
-      "GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET must be set"
-    );
-  }
-
-  const url = `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`;
-  const params = new URLSearchParams({
-    client_id: GRAPH_CLIENT_ID,
-    client_secret: GRAPH_CLIENT_SECRET,
-    scope: "https://graph.microsoft.com/.default",
-    grant_type: "client_credentials",
-  });
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: params.toString(),
-  });
-
-  const data = await resp.json();
-  if (!resp.ok) {
-    console.error("[Graph Token ERROR]:", data);
-    throw new Error("Failed to get Graph access token");
-  }
-
-  return data.access_token;
-}
-
-// ---------- Site & Drives (VationGTM) ----------
-
-const SP_HOSTNAME = "vationbangalore.sharepoint.com";
-const SP_SITE_PATH = "/sites/VationGTM";
-
-async function getSiteAndDriveIds(accessToken) {
-  const siteUrl = `https://graph.microsoft.com/v1.0/sites/${SP_HOSTNAME}:${SP_SITE_PATH}?$select=id`;
-
-  const siteResp = await fetch(siteUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const siteData = await siteResp.json();
-
-  if (!siteResp.ok) {
-    console.error("[Graph Site ERROR]:", siteData);
-    throw new Error("Failed to resolve VationGTM site in Graph");
-  }
-
-  const siteId = siteData.id;
-  console.log("[SP] siteId:", siteId);
-
-  const drivesResp = await fetch(
-    `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const drivesData = await drivesResp.json();
-
-  if (!drivesResp.ok) {
-    console.error("[Graph Drives ERROR]:", drivesData);
-    throw new Error("Failed to list drives for VationGTM site");
-  }
-
-  const drive =
-    drivesData.value.find((d) => d.name === "Documents") ||
-    drivesData.value.find((d) => d.driveType === "documentLibrary") ||
-    drivesData.value[0];
-
-  if (!drive) {
-    throw new Error("No drives found for VationGTM site");
-  }
-
-  console.log("[SP] driveId:", drive.id);
-
-  return { siteId, driveId: drive.id };
-}
-
-// ---------- Graph: search + folder expansion ----------
-
-async function searchDriveForQuestion(question, token) {
-  const { driveId } = await getSiteAndDriveIds(token);
-
-  const term = buildSearchTerm(question);
-  if (!term) {
-    throw new Error("Search term is empty after sanitisation");
-  }
-
-  const encoded = encodeURIComponent(term);
-
-  console.log("[SP] Question:", question);
-  console.log("[SP] Search term:", term);
+// -------- Gemini helper --------
+async function callGeminiSummary({ question, files }) {
+  const model = GEMINI_MODEL || "gemini-2.0-flash";
 
   const url =
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/root/search(q='${encoded}')` +
-    "?$select=name,id,webUrl,folder,file,lastModifiedDateTime,parentReference";
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  const raw = await resp.text();
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    console.error("[SP] Search non-JSON response:", raw);
-    throw new Error("Graph search returned non-JSON response");
-  }
-
-  if (!resp.ok) {
-    console.error("[SP] Search ERROR]:", data);
-    throw new Error("Graph search API error");
-  }
-
-  const baseResults = Array.isArray(data.value) ? data.value : [];
-
-  console.log(
-    "[SP] Raw search hits:",
-    baseResults.map((x) => x.name)
-  );
-
-  const candidates = [];
-
-  // 1) Files directly returned
-  for (const item of baseResults) {
-    if (item.file) {
-      candidates.push({
-        id: item.id,
-        driveId: item.parentReference?.driveId || driveId,
-        name: item.name,
-        webUrl: item.webUrl,
-        lastModified: item.lastModifiedDateTime,
-        kind: "file",
-      });
-    }
-  }
-
-  // 2) Folders: expand each and collect files inside (up to a limit)
-  const folderItems = baseResults.filter((i) => i.folder);
-  for (const folder of folderItems) {
-    const folderDriveId = folder.parentReference?.driveId || driveId;
-    const folderId = folder.id;
-    const folderName = folder.name;
-
-    const childrenUrl = `https://graph.microsoft.com/v1.0/drives/${folderDriveId}/items/${folderId}/children?$top=20&$select=name,id,webUrl,file,lastModifiedDateTime,parentReference`;
-    const childResp = await fetch(childrenUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const childRaw = await childResp.text();
-    let childData;
-    try {
-      childData = JSON.parse(childRaw);
-    } catch {
-      console.error(
-        `[SP] Folder children non-JSON for ${folderName}:`,
-        childRaw
-      );
-      continue;
-    }
-
-    if (!childResp.ok) {
-      console.error(`[SP] Folder children ERROR for ${folderName}:`, childData);
-      continue;
-    }
-
-    const children = Array.isArray(childData.value) ? childData.value : [];
-
-    console.log(
-      `[SP] Folder ${folderName} children:`,
-      children.map((x) => x.name)
-    );
-
-    for (const child of children) {
-      if (child.file) {
-        candidates.push({
-          id: child.id,
-          driveId: child.parentReference?.driveId || folderDriveId,
-          name: child.name,
-          webUrl: child.webUrl,
-          lastModified: child.lastModifiedDateTime,
-          kind: "file-in-folder",
-          parentFolder: folderName,
-        });
-      }
-    }
-  }
-
-  return { driveId, candidates };
-}
-
-// ---------- Download & extract text ----------
-
-async function downloadFileBuffer(token, driveId, itemId) {
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/content`;
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!resp.ok) {
-    console.error("[SP] File download ERROR:", resp.status, resp.statusText);
-    throw new Error("Failed to download file content");
-  }
-
-  const arrayBuffer = await resp.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
-
-async function extractTextFromBuffer(buffer, ext) {
-  if (ext === "txt" || ext === "csv") {
-    return buffer.toString("utf8");
-  }
-
-  if (ext === "docx") {
-    try {
-      const mammothModule = await import("mammoth");
-      const mammoth = mammothModule.default || mammothModule;
-      const result = await mammoth.extractRawText({ buffer });
-      return result.value || "";
-    } catch (e) {
-      console.error("[DOCX extraction ERROR]:", e);
-      return "";
-    }
-  }
-
-  if (ext === "xlsx") {
-    try {
-      const xlsxModule = await import("xlsx");
-      const XLSX = xlsxModule.default || xlsxModule;
-      const workbook = XLSX.read(buffer, { type: "buffer" });
-      const lines = [];
-
-      workbook.SheetNames.forEach((sheetName) => {
-        const sheet = workbook.Sheets[sheetName];
-        if (!sheet) return;
-        const rows = XLSX.utils.sheet_to_json(sheet, {
-          header: 1,
-          blankrows: false,
-        });
-        rows.forEach((row) => {
-          const cells = (row || []).map((c) => (c == null ? "" : String(c)));
-          const line = cells.join(" | ").trim();
-          if (line) lines.push(line);
-        });
-      });
-
-      return lines.join("\n");
-    } catch (e) {
-      console.error("[XLSX extraction ERROR]:", e);
-      return "";
-    }
-  }
-
-  if (ext === "pdf") {
-    try {
-      const pdfModule = await import("pdf-parse");
-      const pdfParse = pdfModule.default || pdfModule;
-      const data = await pdfParse(buffer);
-      return data.text || "";
-    } catch (e) {
-      console.error("[PDF extraction ERROR]:", e);
-      return "";
-    }
-  }
-
-  // Unsupported extension
-  return "";
-}
-
-// ---------- Gemini summariser over multiple docs ----------
-
-async function callGeminiForBestDoc(question, docs) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY must be set");
-  }
-
-  const MAX_DOCS = 3;
-  const MAX_CHARS_PER_DOC = 6000;
-
-  const limitedDocs = docs.slice(0, MAX_DOCS).map((d, idx) => ({
-    index: idx + 1,
-    name: d.name,
-    text: (d.text || "").slice(0, MAX_CHARS_PER_DOC),
+  const compactFiles = (files || []).map((f) => ({
+    fileName: f.fileName,
+    excerpt: (f.extractedText || "").slice(0, 2000),
   }));
 
-  const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-    GEMINI_API_KEY;
-
-  const docBlocks = limitedDocs
-    .map(
-      (d) =>
-        `Document ${d.index} — ${d.name}\n` +
-        `-----------------------------\n` +
-        `${d.text}\n`
-    )
-    .join("\n\n");
-
   const prompt = `
-You are an enterprise assistant working with multiple SharePoint documents.
+You are an enterprise-safe assistant summarising SharePoint documents.
 
 User question:
 ${question}
 
-You have the following candidate documents (possibly truncated):
+You have up to ${compactFiles.length} documents. Summarise ONLY what is present.
 
-${docBlocks}
-
-Instructions:
-- First, decide which single document is MOST relevant to the user's question.
-- If none are relevant, say clearly that you couldn't find a suitable document and briefly mention what you did see.
-- If one is relevant, clearly state which document you are using (by name).
-- Then provide a concise, accurate summary (5–8 bullet points or short paragraphs).
-- Do NOT invent data. If something is not present in the text, do not assume it.
-  `.trim();
+Rules:
+- Output concise bullets.
+- If multiple files: group by file name.
+- Do NOT invent contacts, numbers, owners.
+- If content is empty, say that clearly.
+`.trim();
 
   const body = {
-    contents: [{ parts: [{ text: prompt }] }],
+    contents: [
+      {
+        parts: [{ text: `${prompt}\n\nDOCS:\n${JSON.stringify(compactFiles)}` }],
+      },
+    ],
   };
 
   const resp = await fetch(url, {
@@ -474,23 +71,198 @@ Instructions:
   try {
     data = JSON.parse(raw);
   } catch {
-    console.error("[Gemini non-JSON]:", raw);
-    throw new Error("Gemini returned non-JSON response");
+    throw new Error("Gemini returned non-JSON");
   }
 
   if (!resp.ok) {
-    console.error("[Gemini ERROR]:", data);
-    throw new Error("Gemini API error");
+    const msg = data?.error?.message || "Gemini API error";
+    const code = data?.error?.code || resp.status;
+    throw new Error(`Gemini error (${code}): ${msg}`);
   }
 
-  const answer =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "I was not able to generate a proper summary.";
-  return answer;
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-// ---------- Main handler ----------
+// -------- Graph token helper --------
+async function getGraphToken() {
+  if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
+    throw new Error("GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET are not set");
+  }
 
+  const tokenUrl = `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`;
+  const params = new URLSearchParams();
+  params.append("client_id", GRAPH_CLIENT_ID);
+  params.append("client_secret", GRAPH_CLIENT_SECRET);
+  params.append("scope", "https://graph.microsoft.com/.default");
+  params.append("grant_type", "client_credentials");
+
+  const resp = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+
+  const data = await resp.json();
+  if (!resp.ok) throw new Error("Failed to get Graph access token");
+  return data.access_token;
+}
+
+// -------- Site + Drive helpers --------
+const SP_HOSTNAME = "vationbangalore.sharepoint.com";
+const SP_SITE_PATH = "/sites/VationGTM";
+
+async function getSiteAndDriveIds(accessToken) {
+  const siteUrl = `https://graph.microsoft.com/v1.0/sites/${SP_HOSTNAME}:${SP_SITE_PATH}?$select=id`;
+  const siteResp = await fetch(siteUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const siteData = await siteResp.json();
+  if (!siteResp.ok) throw new Error("Failed to get VationGTM SharePoint site from Graph");
+  const siteId = siteData.id;
+
+  const drivesUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`;
+  const drivesResp = await fetch(drivesUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const drivesData = await drivesResp.json();
+  if (!drivesResp.ok) throw new Error("Failed to get drives for VationGTM site");
+
+  const docsDrive =
+    drivesData.value.find((d) => d.name === "Documents") ||
+    drivesData.value.find((d) => d.driveType === "documentLibrary") ||
+    drivesData.value[0];
+
+  return { siteId, driveId: docsDrive.id };
+}
+
+// -------- Search helpers --------
+function getExtension(name = "") {
+  const parts = name.split(".");
+  return parts.length < 2 ? "" : parts[parts.length - 1].toLowerCase();
+}
+function isSupportedExtension(ext) {
+  return ["docx", "xlsx", "txt", "csv"].includes(ext);
+}
+
+// Fix the “dangerous (?)” and other Graph search oddities.
+// Graph drive search is sensitive. Keep it alphanumeric-ish.
+function sanitizeSearchTerm(term) {
+  return (term || "")
+    .replace(/[\?\#\%\&\{\}\|\\\^~\[\]`]/g, " ")
+    .replace(/['"]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
+function buildSmartSearchTerm(question) {
+  const q = (question || "").toLowerCase();
+
+  // If they ask leadership risk/impact questions, force TXI keywords
+  if (q.includes("risk") || q.includes("impact") || q.includes("issues") || q.includes("customer")) {
+    return "EBC_Account_Health_Risk IT_Operations_Weekly_Report Sales_Risk_Accounts_List";
+  }
+
+  // If they mention a filename explicitly
+  const fileMatch = question.match(/([A-Za-z0-9_\- ]+\.(docx|xlsx|txt|csv))/i);
+  if (fileMatch && fileMatch[1]) return fileMatch[1];
+
+  return question;
+}
+
+async function searchFiles(question, accessToken) {
+  const { driveId } = await getSiteAndDriveIds(accessToken);
+
+  const term = sanitizeSearchTerm(buildSmartSearchTerm(question));
+  const encoded = encodeURIComponent(term);
+
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root/search(q='${encoded}')`;
+
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const raw = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("Drive search returned non-JSON response");
+  }
+
+  if (!resp.ok) throw new Error("Drive search API error");
+
+  const results = [];
+  if (Array.isArray(data.value)) {
+    for (const item of data.value) {
+      const parent = item.parentReference || {};
+      results.push({
+        id: item.id || "",
+        driveId: parent.driveId || driveId,
+        name: item.name || "",
+        webUrl: item.webUrl || "",
+        lastModified: item.lastModifiedDateTime || "",
+        kind: item.file ? "file" : "other",
+      });
+    }
+  }
+  return results;
+}
+
+// -------- Download + extract --------
+async function downloadFileBuffer(accessToken, driveId, itemId) {
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/content`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error("Failed to download file content from Graph");
+  const arrayBuffer = await resp.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+async function extractTextFromBuffer(buffer, ext) {
+  if (ext === "txt" || ext === "csv") {
+    return buffer.toString("utf8");
+  }
+
+  if (ext === "docx") {
+    try {
+      const mammoth = await import("mammoth");
+      const result = await mammoth.extractRawText({ buffer });
+      return result.value || "";
+    } catch {
+      return "";
+    }
+  }
+
+  if (ext === "xlsx") {
+    try {
+      const xlsxModule = await import("xlsx");
+      const XLSX = xlsxModule.default || xlsxModule;
+      const workbook = XLSX.read(buffer, { type: "buffer" });
+      let textChunks = [];
+
+      workbook.SheetNames.forEach((sheetName) => {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) return;
+        const sheetJson = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+        sheetJson.forEach((row) => {
+          const cells = (row || []).map((c) => (c == null ? "" : String(c)));
+          const line = cells.join(" | ").trim();
+          if (line) textChunks.push(line);
+        });
+      });
+
+      return textChunks.join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+// -------- Main handler --------
 export default async function handler(req, res) {
   setCorsHeaders(res);
 
@@ -500,99 +272,91 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    res
-      .status(405)
-      .json({ error: 'Use POST with JSON body { "question": "..." }' });
+    res.status(405).json({ error: 'Use POST with JSON body { "question": "..." }' });
     return;
   }
 
   try {
     const { question } = req.body || {};
     if (!question || typeof question !== "string") {
-      res
-        .status(400)
-        .json({ error: 'Missing "question" in request body or not a string.' });
+      res.status(400).json({ error: 'Missing "question" in request body.' });
       return;
     }
 
     const token = await getGraphToken();
+    const results = await searchFiles(question, token);
 
-    const { candidates } = await searchDriveForQuestion(question, token);
-
-    if (!candidates.length) {
+    if (!results.length) {
       res.status(200).json({
         answer:
-          "I couldn't find any matching SharePoint files in the VationGTM Documents library for that question. Try using the exact file name or a strong keyword from inside the document.",
+          "I couldn't find any matching SharePoint files in the VationGTM Documents library. Try using an exact file name like 'EBC_Account_Health_Risk.docx' or a strong keyword from inside the document.",
+        usedFiles: [],
         candidateFiles: [],
       });
       return;
     }
 
-    // Filter to supported extensions
-    const fileCandidates = candidates.filter((c) =>
-      isSupportedExtension(getExtension(c.name))
-    );
+    // Pick top 3 supported files
+    const supported = results
+      .filter((r) => isSupportedExtension(getExtension(r.name)))
+      .slice(0, 3);
 
-    if (!fileCandidates.length) {
+    if (!supported.length) {
       res.status(200).json({
         answer:
-          "I found items for your search, but none are in a supported format. Allowed formats are: .txt, .csv, .docx, .xlsx, .pdf.",
-        candidateFiles: candidates,
+          "I found files for your search, but none are in a supported format for summarisation (allowed: .docx, .xlsx, .txt, .csv).",
+        usedFiles: [],
+        candidateFiles: results,
       });
       return;
     }
 
-    // Download & extract text for top few candidates
-    const docsWithText = [];
-    for (const c of fileCandidates) {
-      const ext = getExtension(c.name);
-      try {
-        const buf = await downloadFileBuffer(token, c.driveId, c.id);
-        const text = await extractTextFromBuffer(buf, ext);
-        if (text && text.trim()) {
-          docsWithText.push({
-            ...c,
-            extension: ext,
-            text,
-          });
-        } else {
-          console.warn(
-            `[SP] No extractable text from ${c.name} (${ext}) — skipping`
-          );
-        }
-      } catch (e) {
-        console.error(`[SP] Error handling file ${c.name}:`, e);
-      }
+    const extracted = [];
+    for (const f of supported) {
+      const ext = getExtension(f.name);
+      const buffer = await downloadFileBuffer(token, f.driveId, f.id);
+      const extractedText = await extractTextFromBuffer(buffer, ext);
+      extracted.push({
+        fileName: f.name,
+        extractedText,
+        webUrl: f.webUrl,
+        lastModified: f.lastModified,
+        extension: ext,
+      });
     }
 
-    if (!docsWithText.length) {
+    // If Gemini not configured, return deterministic info anyway
+    if (!GEMINI_API_KEY) {
       res.status(200).json({
         answer:
-          "I located some files, but I was not able to extract readable text from any of them. They might be empty, image-only, or protected documents.",
-        candidateFiles: fileCandidates,
+          "Files found, but Gemini summarisation is not configured (GEMINI_API_KEY missing).",
+        usedFiles: extracted.map((f) => ({
+          name: f.fileName,
+          webUrl: f.webUrl,
+          extension: f.extension,
+          lastModified: f.lastModified,
+        })),
+        candidateFiles: results,
       });
       return;
     }
 
-    // Let Gemini choose best doc and summarise
-    const summary = await callGeminiForBestDoc(question, docsWithText);
+    const summary = await callGeminiSummary({ question, files: extracted });
 
     res.status(200).json({
-      answer: summary,
-      usedFiles: docsWithText.map((d) => ({
-        name: d.name,
-        webUrl: d.webUrl,
-        extension: d.extension,
-        lastModified: d.lastModified,
-        parentFolder: d.parentFolder || null,
+      answer: summary || "I couldn't generate a summary.",
+      usedFiles: extracted.map((f) => ({
+        name: f.fileName,
+        webUrl: f.webUrl,
+        extension: f.extension,
+        lastModified: f.lastModified,
       })),
-      candidateFiles: candidates,
+      candidateFiles: results,
     });
   } catch (err) {
-    console.error("[/api/chat-sp ERROR]:", err);
     res.status(500).json({
-      error:
-        "Internal server error in SharePoint assistant. Please check logs or configuration.",
+      error: "Internal server error in SharePoint assistant. Please check logs or configuration.",
+      details: String(err),
     });
   }
 }
